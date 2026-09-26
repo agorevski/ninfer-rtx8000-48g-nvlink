@@ -1,5 +1,6 @@
 #include "ops/linear/q8/q8_dispatch.h"
 #include "ops/linear/q8/q8_shapes.h"
+#include "ops/linear/turing.h"
 
 #include <array>
 #include <stdexcept>
@@ -34,6 +35,12 @@ constexpr std::array kShapes{
 
 Q8Launch select_q8_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
     if (t <= 0) throw std::invalid_argument("q8 linear: T must be positive");
+#if defined(NINFER_SM75)
+    if (n == 124160 && k == 5120) {
+        if (t != 1) throw std::invalid_argument("q8 head row shard: only T=1 is supported");
+        return turing_linear_launch;
+    }
+#endif
     for (const auto& entry : kShapes) {
         if (entry.n == n && entry.k == k) return entry.select(t);
     }
@@ -47,7 +54,11 @@ Q8Launch select_q8_launch(std::int32_t n, std::int32_t k, std::int32_t t, Linear
 
 void q8_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
                  cudaStream_t stream) {
-    select_q8_launch(w.n, w.k, x.ne[1], policy)(x, w, out, stream);
+    const auto launch = select_q8_launch(w.n, w.k, x.ne[1], policy);
+#if defined(NINFER_SM75)
+    if (turing_linear(x, w, out, stream)) return;
+#endif
+    launch(x, w, out, stream);
 }
 
 } // namespace ninfer::ops::detail

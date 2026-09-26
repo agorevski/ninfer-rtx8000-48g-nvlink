@@ -8,6 +8,7 @@
 #include "ops/linear/q5/q5_dispatch.h"
 #include "ops/linear/q6/q6_dispatch.h"
 #include "ops/linear/q8/q8_dispatch.h"
+#include "ops/linear/turing.h"
 
 #include <cstdint>
 #include <limits>
@@ -48,6 +49,7 @@ void validate_linear_policy(LinearPolicy policy) {
 
 void validate_linear_semantics(const Tensor& x, const Weight& w, const Tensor& out,
                                LinearPolicy policy) {
+    detail::require_linear_weight_support(w.qtype, "linear");
     if (x.dtype != DType::BF16 || out.dtype != DType::BF16) {
         throw std::invalid_argument("linear: x/out must be BF16");
     }
@@ -78,10 +80,10 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
                      WorkspaceArena* workspace, cudaStream_t stream) {
     switch (w.qtype) {
     case QType::Q4_G64_FP16:
-        detail::q4_dispatch(x, w, out, policy, stream);
+        detail::q4_dispatch(x, w, out, policy, stream, workspace);
         return;
     case QType::Q5_G64_FP16:
-        detail::q5_dispatch(x, w, out, policy, stream);
+        detail::q5_dispatch(x, w, out, policy, stream, workspace);
         return;
     case QType::Q6_G64_FP16:
         detail::q6_dispatch(x, w, out, policy, stream);
@@ -110,6 +112,7 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
 std::size_t linear_workspace_capacity_bytes(QType qtype, std::int32_t output_rows,
                                             std::int32_t input_rows, LinearPolicy policy,
                                             std::int32_t min_tokens, std::int32_t max_tokens) {
+    detail::require_linear_weight_support(qtype, "linear workspace");
     validate_linear_policy(policy);
     if (min_tokens <= 0 || max_tokens < min_tokens) {
         throw std::invalid_argument("linear workspace: invalid token interval");
@@ -119,11 +122,21 @@ std::size_t linear_workspace_capacity_bytes(QType qtype, std::int32_t output_row
     case QType::Q4_G64_FP16:
         (void)detail::select_q4_launch(output_rows, input_rows, min_tokens, policy);
         (void)detail::select_q4_launch(output_rows, input_rows, max_tokens, policy);
+#if defined(NINFER_SM75)
+        return detail::turing_linear_workspace_capacity_bytes(qtype, input_rows, min_tokens,
+                                                               max_tokens);
+#else
         return 0;
+#endif
     case QType::Q5_G64_FP16:
         (void)detail::select_q5_launch(output_rows, input_rows, min_tokens, policy);
         (void)detail::select_q5_launch(output_rows, input_rows, max_tokens, policy);
+#if defined(NINFER_SM75)
+        return detail::turing_linear_workspace_capacity_bytes(qtype, input_rows, min_tokens,
+                                                               max_tokens);
+#else
         return 0;
+#endif
     case QType::Q6_G64_FP16:
         (void)detail::select_q6_launch(output_rows, input_rows, min_tokens, policy);
         (void)detail::select_q6_launch(output_rows, input_rows, max_tokens, policy);

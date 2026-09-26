@@ -27,8 +27,14 @@ ServeOptions parse(std::vector<std::string> arguments) {
 
 int main() {
     int failures = 0;
+    const auto parallel = parse({"ninfer-serve", "model.ninfer", "--device", "0",
+                                 "--tensor-parallel-device", "1"});
+    failures += check(parallel.device == 0 && parallel.tensor_parallel_device == 1,
+                      "server did not preserve the tensor parallel device");
 
     const ServeOptions defaults = parse({"ninfer-serve", "model.ninfer"});
+    failures += check(defaults.kv_cache == ninfer::kDefaultKvCacheStorage,
+                      "server did not preserve the target KV default");
     failures += check(defaults.allow_prefix_reuse, "prefix reuse is not enabled by default");
     failures +=
         check(!defaults.preserve_thinking, "thinking history is unexpectedly preserved by default");

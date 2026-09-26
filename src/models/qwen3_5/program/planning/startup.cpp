@@ -1,5 +1,7 @@
 #include "models/qwen3_5/execution/attention.h"
 #include "models/qwen3_5/execution/ffn.h"
+#include "models/qwen3_5/execution/tensor_parallel.h"
+#include "runtime/contract/device_target.h"
 #include "models/qwen3_5/execution/gdn.h"
 #include "models/qwen3_5/execution/mtp.h"
 #include "models/qwen3_5/program/planning/graph_profiles.h"
@@ -325,7 +327,8 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                  dimension(config.attention->num_attention_heads),
                                  dimension(config.attention->num_key_value_heads)},
                                 plan.kv_storage, envelope, batch_size, min_width, max_width));
-                    add_scratch(layout, attention->output, first, last);
+                    scratch(layout, execution::output_projection_workspace_bytes(
+                        attention->output, attention->tensor_parallel_output, true, first, last));
                 } else {
                     const auto& gdn = std::get<execution::GdnParameters>(block.mixer);
                     (void)workspace::gdn_control(layout, config, last);
@@ -352,7 +355,8 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                             first, last));
                     }
                     (void)workspace::gdn_normalized_output(layout, config, last);
-                    add_scratch(layout, gdn.output, first, last);
+                    scratch(layout, execution::output_projection_workspace_bytes(
+                        gdn.output, gdn.tensor_parallel_output, true, first, last));
                 }
             }
             auto stage = layout.scope();
@@ -360,7 +364,9 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
             scratch(layout, execution::ffn_workspace_bytes(block.ffn, first, last));
         }
         if (!plan.causal_scoring) {
-            linear_scratch(layout, parameters.text.output_head, first, last);
+            scratch(layout, execution::output_projection_workspace_bytes(
+                parameters.text.output_head, parameters.text.tensor_parallel_head, false,
+                first, last));
         }
     };
     const auto mtp_post_mixer = [&](WorkspaceLayoutBuilder& layout, int first, int last) {
@@ -457,7 +463,9 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                static_cast<std::int32_t>(kCausalScoreTile));
         matrix(causal_score, DType::I32, 1, static_cast<std::int32_t>(kCausalScoreTile));
         matrix(causal_score, DType::FP32, 1, static_cast<std::int32_t>(kCausalScoreTile));
-        linear_scratch(causal_score, parameters.text.output_head, 1, kCausalScoreTile);
+        scratch(causal_score, execution::output_projection_workspace_bytes(
+            parameters.text.output_head, parameters.text.tensor_parallel_head, false,
+            1, kCausalScoreTile));
         out.causal_score = finish(causal_score);
     }
 
@@ -801,8 +809,11 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
         }
         break;
     }
-    if (device.compute_capability() != 120) {
-        throw std::invalid_argument("Qwen3.5 family runtime requires compute capability 12.0");
+    runtime::require_compiled_device(device.compute_capability());
+    if (device.compute_capability() == 75 &&
+        options.kv_cache != KvCacheStorage::BFloat16 &&
+        options.kv_cache != KvCacheStorage::Int8Group64) {
+        throw std::invalid_argument("SM75 text execution requires BF16 or INT8Group64 KV storage");
     }
 }
 

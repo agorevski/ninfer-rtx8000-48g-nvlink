@@ -21,7 +21,7 @@
 
 Generation purpose 的 NInfer Engine 固定运行：
 
-- 一张 GPU；
+- 一张主 GPU，可为受支持的 Dense FFN 选择第二张 tensor-parallel GPU；
 - 一个常驻模型实例；
 - 启动时确定的 `max_concurrency=1..8`；
 - 一个有界 FIFO 等待队列；
@@ -42,9 +42,37 @@ checkpoint 或 cache replica，也不进入 Scheduler/ResourceManager。Generati
 证明其完整执行资源已经得到保障后才会进入 Active；进入 Active 后，它不会因为另一个请求或
 inactive cache 的保留而丢失完成能力。
 
-本文不覆盖多 GPU placement、active request preemption、priority/QoS、跨 Engine context store
+本文不覆盖通用多 GPU placement、active request preemption、priority/QoS、跨 Engine context store
 或大规模 continuous batching。这些工作负载需要重新定义 admission 与公平性合同，不能直接从当前
 小并发模型外推。
+
+### 1.0 RTX 8000 dense FFN placement
+
+`EngineOptions.tensor_parallel_device` selects one distinct secondary SM75 device at startup.
+This path is restricted to dense text inference without Vision or speculative decoding. Both
+Generation and CausalScoring use it. The primary device remains the sole owner of attention,
+GDN state, KV, checkpoints, request scheduling, and admission; device memory is not pooled.
+Both directions must support CUDA peer access. NVLink is the intended deployment topology,
+but the capability check does not distinguish NVLink from another peer-accessible interconnect.
+
+Within each dense FFN, the primary computes the gate projection and the secondary computes the
+up projection concurrently. Each rank receives the other BF16 projection and forms the SiLU
+product. The down projection is divided by output rows; each rank includes its corresponding
+residual rows before the secondary result is gathered onto the primary. No partial-dot all-reduce
+is introduced. Private BF16 projection materialization remains subject to the existing fused
+Op's unrounded mathematical oracle and error criterion.
+
+The immutable Model owns the secondary encoded up/down row planes. Materialization copies stored
+planes without requantization; full primary weight parents remain resident. Program owns
+secondary workspace, streams, and fork/join events. Primary scratch participates in the existing
+capacity calculation; secondary workspace is sized at startup for the declared maximum token
+extent. CUDA Graph capture joins peer work through events and capture-safe UVA transfers.
+Allocation, stream, and event cleanup selects the owning device and restores the caller's binding.
+
+This is intra-request FFN parallelism, not replicated serving or sequential layer offload.
+The one-to-eight-request scheduler and primary-owned KV reservation guarantees are unchanged.
+Supported implementation paths and measured qualification are distinct; see the
+[RTX 8000 record](../performance/rtx8000-qwen3.8-27b.md) for current evidence.
 
 ### 1.1 架构与权重实例
 

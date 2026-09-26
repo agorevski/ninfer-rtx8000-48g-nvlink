@@ -1,7 +1,9 @@
 # Build system
 
 NInfer builds from its source tree with CMake 3.28+ and C++/CUDA 20.
-The supported architecture is `sm_120a`; CUDA 13.1 is the validated development toolkit.
+Architecture selection accepts `sm_75` (RTX 8000) or `sm_120a` (RTX 5090), in separate builds.
+CUDA 12.9/GCC 13 is the Turing integration toolchain; the original SM120a development
+configuration uses CUDA 13.1.
 Product commands and prerequisites are in the
 [README](../../README.md#quick-start); test and measurement workflows live in
 [tests](../../tests/README.md) and [benchmarks](../../bench/README.md).
@@ -35,10 +37,14 @@ The checked-in `CMakePresets.json` provides:
 
 - `release`: Release product binaries, tests and benchmarks disabled;
 - `dev`: Release products, tests and benchmarks enabled;
-- matching build presets and a `dev` test preset with failure output enabled.
+- `rtx8000`: Release product binaries targeting `sm_75`;
+- `rtx8000-dev`: the same Turing target with tests and benchmarks enabled;
+- matching build presets and `dev` / `rtx8000-dev` test presets with failure output enabled.
 
-Both configure presets use `build/`. Switching between them explicitly resets all three build
-options; it does not create independent build trees. Build with `cmake --build build -j`.
+The `release` / `dev` pair uses `build/`; the `rtx8000` / `rtx8000-dev` pair uses
+`build-rtx8000/`. Switching within a pair explicitly resets all three build options.
+The separate Turing directory avoids mixing architecture-specific objects and toolchain caches.
+Build with `cmake --build build -j` or `cmake --build build-rtx8000 -j`, respectively.
 For a separate configuration, override the binary directory with `-B build-<name>` and use that
 directory in subsequent build/test commands.
 
@@ -63,6 +69,14 @@ placeholder with the interpreter from the selected environment:
 Configure that environment with `cmake --preset local`. Compiler paths may also be supplied here;
 changing compilers requires a fresh build directory. There is no tools option, installed SDK,
 package export or configure-time dependency download.
+
+Use one build process per binary directory. Parallel agents should share its completed artifacts,
+not run competing Ninja invocations against the same dependency log. Independent builds need
+separate binary directories. An unchanged second build should report `ninja: no work to do`;
+repeated dependency-log recovery and recompilation are not expected incremental behavior.
+`CMAKE_MAKE_PROGRAM` can select a machine-local Ninja explicitly. The RTX 8000 integration uses
+`/usr/bin/ninja` 1.11.1 after recovering a corrupted dependency log; this is a recorded local
+toolchain choice, not a project version requirement.
 
 ## Targets and dependencies
 

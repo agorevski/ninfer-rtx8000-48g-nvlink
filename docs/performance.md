@@ -1,9 +1,14 @@
-# Single-GPU serving performance
+# Performance
 
 Published measurements use one NVIDIA GeForce RTX 5090 through NInfer's public HTTP serving route.
 Choose a model below for its detailed results, run conditions, output limitations, and reproduction
 commands. These are recorded historical measurements; a model/backend being supported does not
 mean every workload or concurrency has a published measurement.
+
+RTX 8000 single-GPU and NVLink-pair work has a separate
+[Qwen3.8-27B qualification record](performance/rtx8000-qwen3.8-27b.md). Its comparison targets are
+not measurements. Do not attribute the historical RTX 5090 rates below to Turing hardware or
+compare native Engine rates with HTTP rates without identifying their different time boundaries.
 
 Read the [measurement and publication rules](performance/methodology.md) for workload definitions,
 metric formulas, statistics, comparison requirements, and the standard result-page format.

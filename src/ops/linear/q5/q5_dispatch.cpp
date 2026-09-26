@@ -1,5 +1,6 @@
 #include "ops/linear/q5/q5_dispatch.h"
 #include "ops/linear/q5/q5_shapes.h"
+#include "ops/linear/turing.h"
 #include <array>
 #include <stdexcept>
 
@@ -32,7 +33,13 @@ Q5Launch select_q5_launch(std::int32_t n, std::int32_t k, std::int32_t t, Linear
 }
 
 void q5_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPolicy policy,
-                 cudaStream_t stream) {
-    select_q5_launch(weight.n, weight.k, x.ne[1], policy)(x, weight, out, stream);
+                 cudaStream_t stream, WorkspaceArena* workspace) {
+    const auto launch = select_q5_launch(weight.n, weight.k, x.ne[1], policy);
+#if defined(NINFER_SM75)
+    if (turing_linear(x, weight, out, stream, workspace)) return;
+#else
+    (void)workspace;
+#endif
+    launch(x, weight, out, stream);
 }
 } // namespace ninfer::ops::detail

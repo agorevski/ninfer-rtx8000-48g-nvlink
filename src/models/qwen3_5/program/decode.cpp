@@ -2,6 +2,7 @@
 #include "models/qwen3_5/program/context_work.h"
 #include "models/qwen3_5/program/context.h"
 #include "models/qwen3_5/program/graph_execution.h"
+#include "models/qwen3_5/execution/tensor_parallel.h"
 #include "core/nvtx.h"
 #include "core/device.h"
 #include "ninfer/ops/prepare_ragged_prefix.h"
@@ -37,6 +38,7 @@ auto ordinary_batch_body(OrdinaryBatchContext& state, std::int32_t batch_size,
                          {}, state.execution.linear_attention, state.execution.io,
                          state.execution.prefill_hidden, state.execution.prefill_chunk, 0, {},
                          &state.text_cache);
+        card.set_tensor_parallel(state.execution.tensor_parallel);
 
         Tensor tokens             = ordinary.tokens.slice(0, 0, batch_size);
         Tensor cache_positions    = ordinary.cache_positions.slice(0, 0, batch_size);
@@ -76,6 +78,10 @@ void ordinary_decode_batch(OrdinaryBatchContext& state, std::int32_t batch_size,
                            DecodeGraphExecutable* executable) {
     auto body = ordinary_batch_body(state, batch_size, envelope);
     run_prepared(state, executable, body);
+    if (executable && state.execution.tensor_parallel) {
+        state.execution.tensor_parallel->record_graph_execution(
+            static_cast<std::uint32_t>(batch_size));
+    }
 }
 
 } // namespace ninfer::models::qwen3_5::execution
@@ -245,7 +251,8 @@ void ProgramImpl::enqueue_dflash_context_append(std::span<const std::uint32_t> l
 
     execution::DFlashAppendContext state{{device, parameters, work, state_images->linear(),
                                           replay_records ? &*replay_records : nullptr, io,
-                                          prefill_hidden, prefill_chunk, proposal_head},
+                                          prefill_hidden, prefill_chunk, proposal_head,
+                                          tensor_parallel.get()},
                                          *dflash};
     mark_workspace_usage(workspace_plan.dflash_context);
     execution::dflash_append_context(state, features, positions, device_counts,
@@ -334,7 +341,7 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
         execution::OrdinaryBatchContext schedule_state{
             {device, parameters, work, state_images->linear(),
              replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
-             proposal_head},
+             proposal_head, tensor_parallel.get()},
             decoder->text_kv,
             *io.ordinary,
             *ordinary_host_ingress,
@@ -493,7 +500,8 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
 
         execution::MtpBatchContext schedule_state{{device, parameters, work, state_images->linear(),
                                                    replay_records ? &*replay_records : nullptr, io,
-                                                   prefill_hidden, prefill_chunk, proposal_head},
+                                                   prefill_hidden, prefill_chunk, proposal_head,
+                                                   tensor_parallel.get()},
                                                   decoder->text_kv,
                                                   *decoder->mtp_cache(),
                                                   *io.mtp_decode,
@@ -688,7 +696,7 @@ ProgramImpl::decode_dflash_batch(std::span<const std::uint32_t> lanes,
         execution::DFlashBatchContext schedule_state{
             {device, parameters, work, state_images->linear(),
              replay_records ? &*replay_records : nullptr, io, prefill_hidden, prefill_chunk,
-             proposal_head},
+             proposal_head, tensor_parallel.get()},
             decoder->text_kv,
             *dflash,
             *io.dflash_decode,

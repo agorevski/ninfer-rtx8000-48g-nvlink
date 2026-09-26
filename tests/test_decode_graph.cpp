@@ -4,6 +4,7 @@
 
 #include <cuda_runtime.h>
 
+#include <array>
 #include <cstdint>
 #include <exception>
 #include <iostream>
@@ -75,6 +76,43 @@ int main() {
         executable.launch(device.stream);
         device.synchronize();
         failures += expect_value(storage.base(), 0x22222222U, "updated graph launch");
+
+        ninfer::DeviceBuffer source(sizeof(std::uint32_t));
+        ninfer::DecodeGraphDefinition copy;
+        copy.capture(device.stream, [&] {
+            CUDA_CHECK(ninfer::copy_device_async(storage.base(), source.p, source.bytes,
+                                                  device.stream));
+        });
+        ninfer::DecodeGraphExecutable copy_executable;
+        copy_executable.instantiate(copy);
+        for (const std::uint32_t expected : {0x44444444U, 0x55555555U, 0x77777777U}) {
+            source.copy_from_host(&expected, sizeof(expected));
+            copy_executable.launch(device.stream);
+            device.synchronize();
+            failures += expect_value(storage.base(), expected, "captured device copy");
+        }
+
+        const std::array<std::uint32_t, 6> pitched_input{1, 2, 99, 3, 4, 99};
+        ninfer::DeviceBuffer pitched_source(sizeof(pitched_input));
+        ninfer::DeviceBuffer pitched_destination(8 * sizeof(std::uint32_t));
+        pitched_source.copy_from_host(pitched_input.data(), sizeof(pitched_input));
+        pitched_destination.fill(0);
+        ninfer::DecodeGraphDefinition pitched_copy;
+        pitched_copy.capture(device.stream, [&] {
+            CUDA_CHECK(ninfer::copy_device_2d_async(
+                pitched_destination.p, 4 * sizeof(std::uint32_t), pitched_source.p,
+                3 * sizeof(std::uint32_t), 2 * sizeof(std::uint32_t), 2, device.stream));
+        });
+        ninfer::DecodeGraphExecutable pitched_executable;
+        pitched_executable.instantiate(pitched_copy);
+        pitched_executable.launch(device.stream);
+        device.synchronize();
+        std::array<std::uint32_t, 8> pitched_actual{};
+        pitched_destination.copy_to_host(pitched_actual.data(), sizeof(pitched_actual));
+        if (pitched_actual != std::array<std::uint32_t, 8>{1, 2, 0, 0, 3, 4, 0, 0}) {
+            std::cerr << "captured pitched copy changed payload or padding\n";
+            ++failures;
+        }
         return failures == 0 ? 0 : 1;
     } catch (const std::exception& error) {
         std::cerr << "decode graph test failed: " << error.what() << '\n';

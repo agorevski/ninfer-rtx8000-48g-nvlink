@@ -7,6 +7,7 @@
 #include "runtime/contract/request.h"
 #include "runtime/engine/causal_score_core.h"
 #include "runtime/engine/engine_core.h"
+#include "runtime/contract/device_target.h"
 #include "runtime/engine/model_instance.h"
 
 #include <algorithm>
@@ -22,6 +23,9 @@ namespace {
 
 DeviceContext initialize_device(const EngineOptions& options) {
     StartupPhaseScope phase(options.startup_observer, StartupPhase::CudaInitialize);
+    cudaDeviceProp properties{};
+    CUDA_CHECK(cudaGetDeviceProperties(&properties, options.device));
+    runtime::require_compiled_device(properties.major * 10 + properties.minor);
     DeviceContext device(options.device);
     phase.complete();
     return device;

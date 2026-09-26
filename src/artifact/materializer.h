@@ -85,4 +85,14 @@ private:
                                                DeviceContext& device,
                                                const StartupObserver* startup_observer = nullptr);
 
+struct MaterializedWeightRows {
+    DeviceBuffer storage;
+    WeightParent parent;
+};
+
+// Copy stored whole rows without decoding, quantizing, or changing their plane representation.
+// Source and destination devices must have peer access enabled before this call.
+[[nodiscard]] std::unique_ptr<MaterializedWeightRows>
+materialize_weight_rows(const WeightView& rows, DeviceContext& destination);
+
 } // namespace ninfer::artifact

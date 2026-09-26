@@ -61,6 +61,11 @@ qb::BenchOptions parse_for_test(std::vector<std::string> arguments) {
 
 int test_cli_contract() {
     int failures                  = 0;
+    failures += expect(parse_for_test({"ninfer_bench", "--weights", "model.ninfer"}).kv_cache ==
+                           ninfer::kDefaultKvCacheStorage, "benchmark uses target KV default");
+    failures += expect(parse_for_test({"ninfer_bench", "--weights", "model.ninfer",
+                                      "--kv-dtype", "bf16"}).kv_cache == ninfer::KvCacheStorage::BFloat16,
+                       "explicit BF16 is not replaced by target default");
     const qb::BenchOptions parsed = parse_for_test({
         "ninfer_bench",
         "--weights",
@@ -109,6 +114,16 @@ int test_cli_contract() {
     failures += expect(parsed.speculative.proposal_head == ninfer::ProposalHead::Optimized,
                        "optimized proposal head");
     failures += expect(parsed.device == 1 && !parsed.use_cuda_graph, "device and graph settings");
+    const auto pair = parse_for_test({"ninfer_bench", "--weights", "model.ninfer", "--device", "2",
+                                      "--tensor-parallel-device", "3"});
+    failures += expect(pair.device == 2 && pair.tensor_parallel_device == 3, "NVLink pair ordinals");
+    for (const auto peer : {"0", "-1"}) {
+        failures += expect_throws<std::invalid_argument>(
+            [&] {
+                (void)parse_for_test({"ninfer_bench", "--weights", "model.ninfer",
+                                      "--tensor-parallel-device", peer});
+            }, "invalid peer ordinal");
+    }
     failures += expect(parsed.profile_measured, "profile-measured flag");
     failures +=
         expect(parsed.output == qb::OutputFormat::Json && parsed.output_file == "report.json",
@@ -324,7 +339,30 @@ int test_report_contract() {
         return fail(std::string("invalid benchmark JSON: ") + error.what());
     }
 
-    failures += expect(report.at("schema_version") == 15, "report schema v15");
+    failures += expect(report.at("schema_version") == 16, "report schema v16");
+    failures += expect(report.at("environment").at("tensor_parallel_device").is_null(),
+                       "single GPU report does not invent a peer");
+    auto pair_environment = env;
+    pair_environment.tensor_parallel_device = 1;
+    pair_environment.memory.tensor_parallel = ninfer::TensorParallelMemorySummary{
+        .device = 1,
+        .weights = {.capacity_bytes = 500, .used_bytes = 450, .peak_used_bytes = 450},
+        .workspace = {.capacity_bytes = 250, .used_bytes = 0, .peak_used_bytes = 0},
+    };
+    auto pair_results = results;
+    pair_results[0].tensor_parallel_workspace_peak_bytes = 42;
+    const Json pair_report = Json::parse(qb::format_json(pair_environment, "pair", pair_results));
+    failures += expect(pair_report.at("environment").at("tensor_parallel_device") == 1,
+                       "report records tensor parallel placement");
+    failures += expect(report.at("memory").at("tensor_parallel").is_null(),
+                       "single GPU has no peer residency");
+    const auto& peer_memory = pair_report.at("memory").at("tensor_parallel");
+    failures += expect(peer_memory.at("device") == 1 &&
+                           peer_memory.at("weights").at("capacity_bytes") == 500 &&
+                           peer_memory.at("workspace").at("capacity_bytes") == 250,
+                       "peer allocations reported separately from primary");
+    failures += expect(pair_report.at("tests").at(0).at("tensor_parallel_workspace_peak_bytes") == 42,
+                       "peer workspace peak is measured per test");
     failures += expect(report.at("config").at("speculative_backend") == "mtp" &&
                            report.at("config").at("draft_tokens") == 5,
                        "report identifies its backend and window");

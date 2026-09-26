@@ -20,7 +20,10 @@ import argparse
 import csv
 import dataclasses
 import datetime as dt
+import hashlib
 import json
+import math
+import os
 import shlex
 import subprocess
 import sys
@@ -40,7 +43,7 @@ CONTEXT_CORE = ((512, 512), (2048, 512), (8192, 512))
 CONTEXT_FULL_EXTRA = ((32768, 256), (65536, 128))
 PRIMARY_KS = (0, 3, 5)
 SWEEP_KS = (0, 1, 2, 3, 4, 5)
-REPORT_SCHEMA_VERSION = 15
+REPORT_SCHEMA_VERSION = 16
 REPORT_ARTIFACT_TYPE = "ninfer_bench_report"
 REPORT_TOOL = "ninfer_bench"
 
@@ -91,6 +94,26 @@ def add_repetition_args(
 
 
 def build_cases(preset: str) -> list[BenchCase]:
+    if preset == "rtx8000":
+        return [BenchCase(
+            "native", "pp512_pp4096_tg128",
+            ("-p", "512,4096", "-n", "128", "--max-ctx", "8192",
+             "--prefill-chunk", "2048"), 5, 1,
+            "MTP off; same-count TokenFurnace native reference, not identical token content",
+        )]
+    if preset == "rtx8000-long":
+        return [BenchCase(
+            "long_context", "pp32768_tg1024",
+            ("-pg", "32768,1024", "--max-ctx", "262144",
+             "--prefill-chunk", "2048"), 5, 1,
+            "32K prefill / 1K decode in a 262144-token allocation; not a full-length pass",
+        )]
+    if preset == "rtx8000-capacity":
+        return [BenchCase(
+            "capacity", "capacity262144",
+            ("-pg", "16,8", "--max-ctx", "262144", "--prefill-chunk", "2048"),
+            1, 0, "capacity allocation plus short generation only, not 262K input validation",
+        )]
     if preset == "smoke":
         return [
             BenchCase("prefill_length", "prefill_p128_k0", ("-p", "128", *mtp_args(0)), 1, 0),
@@ -257,6 +280,33 @@ def load_bench_report(report_path: Path) -> dict[str, Any]:
             f"schema_version={identity[0]!r}, artifact_type={identity[1]!r}, "
             f"tool={identity[2]!r}; expected {expected!r}"
         )
+    tests = report.get("tests")
+    repetitions = report.get("config", {}).get("repetitions")
+    if not isinstance(tests, list) or not tests or type(repetitions) is not int or repetitions < 1:
+        raise ValueError("benchmark report has no measured tests/repetitions")
+    for test in tests:
+        if not isinstance(test, dict) or len(test.get("reps", [])) != repetitions:
+            raise ValueError("benchmark report has incomplete repetitions")
+        if test.get("kind") not in ("pp", "tg", "pp+tg") or (
+            type(test.get("requested_output_tokens")) is not int
+            or test["requested_output_tokens"] < 1
+        ):
+            raise ValueError("benchmark report has invalid test/count metadata")
+        for metric in ("prefill_tok_s_mean", "decode_output_tok_s_mean",
+                       "prefill_tok_s_stddev", "decode_output_tok_s_stddev"):
+            value = test.get(metric)
+            if value is not None and (
+                not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0
+            ):
+                raise ValueError(f"invalid benchmark metric: {metric}")
+        for rep in test["reps"]:
+            if rep.get("generated_output_tokens") != test.get("requested_output_tokens"):
+                raise ValueError("benchmark report output token counts differ")
+        for kind, metric in (("pp", "prefill_tok_s_mean"), ("tg", "decode_output_tok_s_mean")):
+            if kind in test["kind"] and (
+                not isinstance(test.get(metric), (int, float)) or test[metric] <= 0
+            ):
+                raise ValueError(f"benchmark report missing positive phase rate: {metric}")
     return report
 
 
@@ -268,6 +318,7 @@ def report_rows(report_path: Path, case: BenchCase) -> list[dict[str, Any]]:
     weights_memory = memory.get("weights", {})
     sequence_memory = memory.get("sequence", {})
     workspace_memory = memory.get("workspace", {})
+    peer_memory = memory.get("tensor_parallel") or {}
     vision_workspace = memory.get("vision_workspace") or {}
     rows = []
     for test in report.get("tests", []):
@@ -316,6 +367,9 @@ def report_rows(report_path: Path, case: BenchCase) -> list[dict[str, Any]]:
             "cuda_graph_allowance_bytes": memory.get("cuda_graph_allowance_bytes"),
             "workspace_peak_bytes": test.get("workspace_peak_bytes"),
             "workspace_allocator_peak_bytes": test.get("workspace_allocator_peak_bytes"),
+            "tensor_parallel_weights_capacity_bytes": peer_memory.get("weights", {}).get("capacity_bytes"),
+            "tensor_parallel_workspace_capacity_bytes": peer_memory.get("workspace", {}).get("capacity_bytes"),
+            "tensor_parallel_workspace_peak_bytes": test.get("tensor_parallel_workspace_peak_bytes"),
             "prefill_tok_s_mean": test.get("prefill_tok_s_mean"),
             "prefill_tok_s_stddev": test.get("prefill_tok_s_stddev"),
             "decode_output_tok_s_mean": test.get("decode_output_tok_s_mean"),
@@ -336,6 +390,8 @@ def report_rows(report_path: Path, case: BenchCase) -> list[dict[str, Any]]:
                 speculative.get("accepted_per_position", []), separators=(",", ":")
             ),
             "gpu_name": report.get("environment", {}).get("gpu_name"),
+            "device_id": report.get("environment", {}).get("device_id"),
+            "tensor_parallel_device": report.get("environment", {}).get("tensor_parallel_device"),
         }
         rows.append(row)
     return rows
@@ -354,18 +410,68 @@ def write_summary(rows: Sequence[dict[str, Any]], out_dir: Path) -> None:
     (out_dir / "summary.json").write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
 
 
-def run_command(command: Sequence[str], stdout_path: Path, stderr_path: Path) -> int:
+def gpu_snapshot(gpus: str) -> dict[str, Any]:
+    def query(arguments: list[str]) -> str:
+        return subprocess.run(
+            ["nvidia-smi", *arguments], check=True, capture_output=True, text=True
+        ).stdout
+
+    gpu_text = query([
+        "-i", gpus,
+        "--query-gpu=index,uuid,name,driver_version,temperature.gpu,power.draw,power.limit,"
+        "clocks.current.sm,clocks.current.memory,memory.used,memory.total,utilization.gpu",
+        "--format=csv",
+    ])
+    uuids = {row[1].strip() for row in list(csv.reader(gpu_text.splitlines()))[1:]}
+    processes = query([
+        "--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory", "--format=csv",
+    ])
+    selected = [
+        row for row in list(csv.reader(processes.splitlines()))[1:]
+        if row and row[0].strip() in uuids
+    ]
+    return {"time_utc": dt.datetime.now(dt.UTC).isoformat(), "gpu_csv": gpu_text,
+            "compute_processes": selected}
+
+
+def run_command(command: Sequence[str], stdout_path: Path, stderr_path: Path,
+                telemetry_gpus: str | None = None) -> int:
+    snapshots = []
+    if telemetry_gpus:
+        snapshots.append(gpu_snapshot(telemetry_gpus))
+        if snapshots[-1]["compute_processes"]:
+            raise RuntimeError(f"selected GPUs have competing compute processes: {snapshots[-1]}")
     with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
         "w", encoding="utf-8"
     ) as stderr:
-        process = subprocess.run(
-            list(command),
-            cwd=REPO_ROOT,
-            text=True,
-            stdout=stdout,
-            stderr=stderr,
-            check=False,
-        )
+        process = subprocess.Popen(list(command), cwd=REPO_ROOT, text=True,
+                                   stdout=stdout, stderr=stderr)
+        try:
+            while process.poll() is None:
+                if telemetry_gpus:
+                    snapshot = gpu_snapshot(telemetry_gpus)
+                    snapshots.append(snapshot)
+                    competing = [row for row in snapshot["compute_processes"]
+                                 if int(row[1]) != process.pid]
+                    if competing:
+                        raise RuntimeError(f"competing GPU workload detected: {competing}")
+                try:
+                    process.wait(timeout=1 if telemetry_gpus else None)
+                except subprocess.TimeoutExpired:
+                    pass
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            if telemetry_gpus:
+                snapshots.append(gpu_snapshot(telemetry_gpus))
+                stdout_path.with_suffix(".telemetry.json").write_text(
+                    json.dumps(snapshots, indent=2) + "\n", encoding="utf-8"
+                )
     return process.returncode
 
 
@@ -377,22 +483,30 @@ def write_manifest(
 ) -> None:
     manifest = {
         "artifact_type": "ninfer_bench_matrix_run",
-        "schema_version": 4,
+        "schema_version": 5,
         "created_at_utc": dt.datetime.now(dt.UTC).isoformat(),
         "preset": args.preset,
-        "primary_mtp_draft_tokens": 3,
-        "primary_proposal_head": "optimized",
+        "primary_mtp_draft_tokens": 0 if args.preset.startswith("rtx8000") else 3,
+        "primary_proposal_head": "none" if args.preset.startswith("rtx8000") else "optimized",
         "repo_root": str(REPO_ROOT),
         "bench": str(args.bench),
+        "bench_mtime_ns": args.bench.stat().st_mtime_ns if args.bench.is_file() else None,
         "artifact": str(args.weights),
         "corpus": str(args.corpus),
         "corpus_tokens": count_corpus_tokens(args.corpus),
+        "corpus_sha256": hashlib.sha256(args.corpus.read_bytes()).hexdigest(),
+        "artifact_bytes": args.weights.stat().st_size,
+        "artifact_mtime_ns": args.weights.stat().st_mtime_ns,
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "telemetry_physical_gpus": args.telemetry_gpus,
+        "kv_dtype": args.kv_dtype,
+        "tensor_parallel_device": args.tensor_parallel_device,
         "dry_run": args.dry_run,
         "resume": args.resume,
         "case_count": len(cases),
         "commands": list(commands),
         "notes": [
-            "k=3 with the optimized proposal head is the primary MTP path.",
+            "RTX8000 presets disable MTP; other presets use k=3 as the primary MTP path.",
             "Use context_decode and mtp_sweep rows for MTP efficiency decisions.",
             "tg rows use a one-token seed and report G decode tokens after the begin token.",
         ],
@@ -402,7 +516,8 @@ def write_manifest(
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--preset", choices=("smoke", "core", "full"), default="core")
+    parser.add_argument("--preset", choices=(
+        "smoke", "core", "full", "rtx8000", "rtx8000-long", "rtx8000-capacity"), default="core")
     parser.add_argument("--bench", type=Path, default=DEFAULT_BENCH)
     parser.add_argument(
         "--weights", type=Path, default=DEFAULT_WEIGHTS, help=".ninfer artifact passed to the bench"
@@ -410,6 +525,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--device", type=int, default=0)
+    parser.add_argument("--tensor-parallel-device", type=int)
+    parser.add_argument("--build-dir", type=Path, default=REPO_ROOT / "build")
+    parser.add_argument("--kv-dtype", choices=("bf16", "int8", "fp8", "nvfp4", "k8v4"))
+    parser.add_argument("--telemetry-gpus",
+                        help="physical nvidia-smi GPU IDs, e.g. 0 or 2,3; reject competing compute")
     parser.add_argument("--suite", action="append", default=[], help="suite to run; repeatable")
     parser.add_argument("--limit", type=int, default=None, help="run only the first N selected cases")
     parser.add_argument("--repetitions", type=int, default=None, help="override all case repetitions")
@@ -430,10 +550,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise SystemExit("--repetitions must be positive")
     if args.warmup is not None and args.warmup < 0:
         raise SystemExit("--warmup must be nonnegative")
+    if args.device < 0 or (args.tensor_parallel_device is not None and (
+        args.tensor_parallel_device < 0 or args.tensor_parallel_device == args.device
+    )):
+        raise SystemExit("devices must be nonnegative and tensor-parallel device must differ")
 
     args.bench = args.bench.expanduser().resolve()
     args.weights = args.weights.expanduser().resolve()
     args.corpus = args.corpus.expanduser().resolve()
+    args.build_dir = args.build_dir.expanduser().resolve()
+    if args.telemetry_gpus and (
+        not all(part.isdecimal() for part in args.telemetry_gpus.split(","))
+        or len(set(args.telemetry_gpus.split(","))) != len(args.telemetry_gpus.split(","))
+    ):
+        raise SystemExit("--telemetry-gpus requires distinct comma-separated physical GPU IDs")
 
     if not args.weights.is_file():
         raise SystemExit(f"weights file not found: {args.weights}")
@@ -471,6 +601,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             str(args.corpus),
             "--device",
             str(args.device),
+            *(["--tensor-parallel-device", str(args.tensor_parallel_device)]
+              if args.tensor_parallel_device is not None else []),
+            *(["--kv-dtype", args.kv_dtype] if args.kv_dtype else []),
             *case.args,
             "--output",
             "json",
@@ -490,7 +623,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         commands_sh.append(shell_join(command))
     commands_text = "#!/usr/bin/env bash\nset -euo pipefail\n\n" + "\n\n".join(commands_sh) + "\n"
     (out_dir / "commands.sh").write_text(commands_text, encoding="utf-8")
+    previous_manifest = {}
+    if args.resume and (out_dir / "manifest.json").is_file():
+        try:
+            previous_manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
     write_manifest(out_dir, args, cases, command_records)
+    current_manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+    resume_compatible = bool(previous_manifest) and not previous_manifest.get("dry_run") and all(
+        previous_manifest.get(key) == current_manifest.get(key)
+        for key in ("schema_version", "bench_mtime_ns", "artifact", "artifact_bytes", "artifact_mtime_ns",
+                    "corpus_sha256", "cuda_visible_devices", "commands")
+    )
 
     if args.dry_run:
         print(f"wrote dry-run matrix to {out_dir}")
@@ -498,11 +643,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     failures: list[dict[str, Any]] = []
+    if args.telemetry_gpus:
+        topology = subprocess.run(["nvidia-smi", "topo", "-m"], check=True,
+                                  capture_output=True, text=True)
+        (out_dir / "topology.txt").write_text(topology.stdout, encoding="utf-8")
+        nvlink = subprocess.run(["nvidia-smi", "nvlink", "-s"], check=True,
+                                capture_output=True, text=True)
+        (out_dir / "nvlink.txt").write_text(nvlink.stdout, encoding="utf-8")
     if not args.no_build:
         build_stdout = log_dir / "build.stdout.txt"
         build_stderr = log_dir / "build.stderr.txt"
         rc = run_command(
-            ["cmake", "--build", "build", "-j", "--target", "ninfer_bench"],
+            ["cmake", "--build", str(args.build_dir), "-j", "--target", "ninfer_bench"],
             build_stdout,
             build_stderr,
         )
@@ -527,7 +679,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     for index, record in enumerate(command_records, start=1):
         case = cases[index - 1]
         report_path = Path(record["report"])
-        if args.resume and report_path.is_file():
+        if args.resume and resume_compatible and report_path.is_file():
             try:
                 load_bench_report(report_path)
                 print(f"[{index}/{len(cases)}] skip {case.name} (existing report)")
@@ -538,7 +690,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         stdout_path = log_dir / f"{case.suite}.{case.name}.stdout.txt"
         stderr_path = log_dir / f"{case.suite}.{case.name}.stderr.txt"
         print(f"[{index}/{len(cases)}] run {case.suite}/{case.name}")
-        rc = run_command(record["command"], stdout_path, stderr_path)
+        # An old report must never turn a failed rerun into a retained measurement.
+        report_path.unlink(missing_ok=True)
+        try:
+            rc = run_command(record["command"], stdout_path, stderr_path, args.telemetry_gpus)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            rc = 1
+            failures.append({"case": case.name, "error": str(exc)})
         if rc != 0:
             failures.append(
                 {
@@ -551,6 +709,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 }
             )
             print(f"  failed with rc={rc}; see {stderr_path}", file=sys.stderr)
+            report_path.unlink(missing_ok=True)
             continue
         if not report_path.is_file():
             failures.append(

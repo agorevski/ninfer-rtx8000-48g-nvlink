@@ -5,6 +5,22 @@ download an artifact using the [project README](../README.md) before following t
 
 The examples use Qwen3.8-27B NVFP4 with FP8 KV storage.
 
+## RTX 8000 placement
+
+Use the `rtx8000` build preset, the **groupwise-int** Qwen3.8-27B artifact
+`qwen3_8_27b.ninfer`, and `--kv-dtype int8` on Turing. The NVFP4/FP8 examples elsewhere in
+this guide describe the RTX 5090 configuration, not the RTX 8000 path.
+
+Device ordinals are relative to `CUDA_VISIBLE_DEVICES`. For a single physical GPU, expose only
+that device and use `--device 0`. For the physical NVLink pair 2/3, expose `2,3` and pass
+`--device 0 --tensor-parallel-device 1`. The second device accelerates dense FFNs within the
+same request; it does not create a second Engine or extend the primary KV pool.
+Tensor parallelism currently requires two SM75 devices with bidirectional peer access and
+excludes Vision and speculative decoding. Single-GPU operation omits the option.
+
+The [RTX 8000 qualification record](performance/rtx8000-qwen3.8-27b.md) records build,
+artifact, workload, and measurement limitations; an available option is not a speedup claim.
+
 ## Text input
 
 ```bash

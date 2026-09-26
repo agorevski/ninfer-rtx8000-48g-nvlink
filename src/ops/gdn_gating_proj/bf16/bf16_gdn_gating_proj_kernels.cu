@@ -292,11 +292,10 @@ bool launch_bf16_prefill_mma(Bf16GdnGatingTokenVariant variant, const Tensor& x,
                         static_cast<unsigned>(SplitK));
         auto launch = [&](auto full_tokens) {
             constexpr bool FullTokens     = decltype(full_tokens)::value;
-            static const cudaError_t attr = cudaFuncSetAttribute(
+            CUDA_CHECK(configure_dynamic_shared_memory(
                 bf16_gdn_gating_proj_gemm_mma_kernel<Geometry, SplitK, FullTokens, Warps,
                                                      NormalizeInput, NormTokenCapacity>,
-                cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemBytes);
-            CUDA_CHECK(attr);
+                kSmemBytes));
             if constexpr (SplitK > 1) {
                 cudaLaunchConfig_t config{};
                 config.gridDim          = grid;
@@ -357,8 +356,24 @@ bool launch_bf16_prefill_mma(Bf16GdnGatingTokenVariant variant, const Tensor& x,
     } else {
         constexpr std::int64_t kCtasPerTokenTile =
             static_cast<std::int64_t>(Geometry::kHeads / kBf16GdnBlockM) * SplitK;
+#if defined(NINFER_SM75)
+        const auto resident_blocks = [&](auto full_tokens) {
+            constexpr bool FullTokens = decltype(full_tokens)::value;
+            const auto kernel =
+                bf16_gdn_gating_proj_gemm_mma_kernel<Geometry, SplitK, FullTokens, Warps,
+                                                     NormalizeInput, NormTokenCapacity>;
+            CUDA_CHECK(configure_dynamic_shared_memory(kernel, kSmemBytes));
+            int blocks = 0;
+            CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                &blocks, kernel, Warps * 32, kSmemBytes));
+            return blocks;
+        };
+        const std::int32_t kResidentCtasPerSm =
+            std::min(resident_blocks(std::true_type{}), resident_blocks(std::false_type{}));
+#else
         constexpr std::int32_t kResidentCtasPerSm =
             cooperative_resident_ctas_per_sm<Geometry, SplitK>();
+#endif
         const std::int64_t resident_ctas =
             static_cast<std::int64_t>(multiprocessor_count) * kResidentCtasPerSm;
         const std::int64_t max_token_tiles = resident_ctas / kCtasPerTokenTile;

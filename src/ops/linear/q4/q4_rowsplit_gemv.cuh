@@ -4,6 +4,7 @@
 #include "ops/common/memory.cuh"
 #include "ops/common/warp.cuh"
 #include "ops/linear/q4/q4_rowsplit_storage.cuh"
+#include "ops/linear/turing_gemv.cuh"
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -424,6 +425,26 @@ void q4_rowsplit_gemv_kernel(
         if (threadIdx.x == 0) { pdl::trigger_dependents(); }
     }
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    const int local_row = warp / kWarpsPerRow;
+    const int split = warp % kWarpsPerRow;
+    const int row = blockIdx.x * kRowsPerCta + local_row;
+    __shared__ float partial[kRowsPerCta][kWarpsPerRow];
+    const auto offset = static_cast<std::int64_t>(row) * k;
+    const float sum = turing_rowsplit_dot<4, kWarpsPerRow>(
+        x, codes + offset / 2, nullptr, scales + offset / 64 * 2, k, split);
+    if (lane == 0) partial[local_row][split] = sum;
+    __syncthreads();
+    if (split == 0 && lane == 0) {
+        float value = 0.0f;
+#pragma unroll
+        for (int i = 0; i < kWarpsPerRow; ++i) value += partial[local_row][i];
+        epilogue.template operator()<SplitOutput, SplitRow>(out, out_tail, row, value);
+    }
+    if constexpr (JoinPdl) { pdl::wait_for_dependencies(); }
+#else
     __shared__ Q4GemvTileStorage<Schedule> shared_tiles;
     __shared__ float row_partials[kRowsPerCta][kWarpsPerRow];
     extern __shared__ __align__(16) unsigned char dynamic_shared[];
@@ -514,6 +535,7 @@ void q4_rowsplit_gemv_kernel(
         }
     }
     if constexpr (JoinPdl) { pdl::wait_for_dependencies(); }
+#endif
 }
 
 } // namespace ninfer::ops::detail

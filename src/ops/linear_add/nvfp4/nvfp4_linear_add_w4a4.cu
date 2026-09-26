@@ -60,6 +60,9 @@ void launch_problem(const Weight& weight, Tensor& residual, Nvfp4W4a4Workspace w
 
 void nvfp4_linear_add_w4a4_launch(const Tensor& x, const Weight& weight, Tensor& residual,
                                   Nvfp4W4a4Workspace workspace, cudaStream_t stream) {
+#if defined(NINFER_SM75)
+    throw std::invalid_argument("NVFP4 tensor-core residual projections require SM120a");
+#else
     const std::int32_t tokens = x.ne[1];
     launch_nvfp4_w4a4_quantize(
         x, weight, workspace,
@@ -87,6 +90,7 @@ void nvfp4_linear_add_w4a4_launch(const Tensor& x, const Weight& weight, Tensor&
         break;
     }
     throw std::invalid_argument("nvfp4 linear_add: unsupported problem");
+#endif
 }
 
 } // namespace ninfer::ops::detail

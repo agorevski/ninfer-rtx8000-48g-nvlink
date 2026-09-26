@@ -7,6 +7,7 @@
 #include "ops/softmax_attention/dense/causal_cache/prompt_fp8.cuh"
 
 #include <cstdint>
+#include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
@@ -16,9 +17,12 @@ void causal_attention_prompt_fp8_attention_launch_for(const Tensor& q, const Ten
                                                       float scale, const CacheView& cache,
                                                       Metadata metadata, Tensor& out,
                                                       cudaStream_t stream) {
-    static const cudaError_t attr = cudaFuncSetAttribute(
+#if defined(NINFER_SM75)
+    throw std::invalid_argument("FP8 causal attention is not supported on SM75; use INT8 group64");
+#else
+    const cudaError_t attr = configure_dynamic_shared_memory(
         causal_attention_prompt_fp8_kernel<Geometry, Metadata>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize, kCausalPromptFp8SmemBytes);
+        kCausalPromptFp8SmemBytes);
     CUDA_CHECK(attr);
 
     const auto tokens = static_cast<std::int32_t>(q.ne[2]);
@@ -34,6 +38,7 @@ void causal_attention_prompt_fp8_attention_launch_for(const Tensor& q, const Ten
             static_cast<const std::int32_t*>(positions.data), scale,
             static_cast<__nv_bfloat16*>(out.data), tokens);
     CUDA_CHECK(cudaGetLastError());
+#endif
 }
 
 template <typename CacheView, typename Metadata>

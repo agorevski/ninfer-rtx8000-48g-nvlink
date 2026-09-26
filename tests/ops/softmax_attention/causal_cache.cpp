@@ -38,6 +38,14 @@ constexpr std::int32_t kNvfp4CodeBytes   = kHeadDim / 2;
 constexpr float kAttentionScale          = 0.0625f;
 constexpr std::uint16_t kOutputCanary    = 0x7fc1u;
 
+constexpr bool supported_storage(KvCacheStorage storage) {
+#if defined(NINFER_SM75)
+    return storage == KvCacheStorage::BFloat16 || storage == KvCacheStorage::Int8Group64;
+#else
+    return true;
+#endif
+}
+
 // A1 and A3 use one fixed criterion for each registered storage profile; token count, geometry,
 // execution envelope, and private launch route do not select or relax it.
 constexpr ReductionCriterion kAttentionBf16Criterion{
@@ -2170,6 +2178,7 @@ int run_dflash2_cases() {
     for (auto storage :
          {KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64, KvCacheStorage::Fp8E4M3Row256,
           KvCacheStorage::Nvfp4Group16, KvCacheStorage::Fp8KeyNvfp4Value}) {
+        if (!supported_storage(storage)) continue;
         const auto run = [&](int width, int batch, int base, bool graph) {
             BatchAttentionCase c{width,
                                  {},
@@ -2214,6 +2223,7 @@ int run_batch_cases() {
     for (auto storage :
          {KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64, KvCacheStorage::Fp8E4M3Row256,
           KvCacheStorage::Nvfp4Group16, KvCacheStorage::Fp8KeyNvfp4Value}) {
+        if (!supported_storage(storage)) continue;
         failures += run_batch_case(kGeometries[0], storage,
                                    {16, {0}, {0}, {0}, MappingPattern::Fragmented, 1501u});
         failures += run_batch_case(kGeometries[0], storage,
@@ -2237,7 +2247,7 @@ int run_batch_cases() {
                        {6, {61, 127, 511}, {6, 3, 0}, {2, 0, 1}, MappingPattern::Fragmented, 503u});
     failures += run_batch_case(kGeometries[1], KvCacheStorage::BFloat16,
                                {16, {49, 2041}, {16, 7}, {1, 0}, MappingPattern::Identity, 504u});
-    failures +=
+    if (supported_storage(KvCacheStorage::Fp8E4M3Row256)) failures +=
         run_batch_case(kGeometries[0], KvCacheStorage::Fp8E4M3Row256,
                        {6, {61, 127, 511}, {6, 3, 0}, {2, 0, 1}, MappingPattern::Fragmented, 505u});
     return failures;
@@ -2393,6 +2403,15 @@ int verify_workspace_capacity_contract() {
           KvCacheStorage::Nvfp4Group16, KvCacheStorage::Fp8KeyNvfp4Value}) {
         constexpr ops::CausalAttentionExecutionEnvelope envelope{1, 1025};
         constexpr ops::AttentionHeadGeometry geometry{kHeadDim, 16, 2};
+        if (!supported_storage(storage)) {
+            try {
+                (void)ops::causal_softmax_attention_workspace_capacity_bytes(
+                    geometry, storage, envelope, 1, 1, 17);
+                std::cerr << "SM75 accepted unsupported attention cache storage\n";
+                ++failures;
+            } catch (const std::invalid_argument&) {}
+            continue;
+        }
         const std::size_t interval = ops::causal_softmax_attention_workspace_capacity_bytes(
             geometry, storage, envelope, 1, 1, 17);
         std::size_t witness = 0;
@@ -2426,6 +2445,7 @@ int verify_workspace_capacity_contract() {
 } // namespace
 
 int run_softmax_attention_nvfp4_tests() {
+    if (!supported_storage(KvCacheStorage::Nvfp4Group16)) return 77;
     if (cuda_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
@@ -2439,6 +2459,7 @@ int run_softmax_attention_nvfp4_tests() {
 }
 
 int run_softmax_attention_k8v4_tests() {
+    if (!supported_storage(KvCacheStorage::Fp8KeyNvfp4Value)) return 77;
     if (cuda_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
@@ -2458,16 +2479,24 @@ int run_softmax_attention_causal_cache_tests() {
     }
 
     int failures = verify_workspace_capacity_contract();
-    failures += run_nvfp4_cases();
-    failures += run_quantized_batch_cases(KvCacheStorage::Nvfp4Group16, 720u);
-    failures += report_quantization_quality(KvCacheStorage::Nvfp4Group16, 724u);
-    failures += run_k8v4_cases();
-    failures += run_quantized_batch_cases(KvCacheStorage::Fp8KeyNvfp4Value, 815u);
-    failures += report_quantization_quality(KvCacheStorage::Fp8KeyNvfp4Value, 819u);
+    if (supported_storage(KvCacheStorage::Nvfp4Group16)) {
+        failures += run_nvfp4_cases();
+        failures += run_quantized_batch_cases(KvCacheStorage::Nvfp4Group16, 720u);
+        failures += report_quantization_quality(KvCacheStorage::Nvfp4Group16, 724u);
+    }
+    if (supported_storage(KvCacheStorage::Fp8KeyNvfp4Value)) {
+        failures += run_k8v4_cases();
+        failures += run_quantized_batch_cases(KvCacheStorage::Fp8KeyNvfp4Value, 815u);
+        failures += report_quantization_quality(KvCacheStorage::Fp8KeyNvfp4Value, 819u);
+    }
     for (const Geometry& geometry : kGeometries) { failures += run_geometry(geometry); }
-    failures += run_fp8_cases();
+    if (supported_storage(KvCacheStorage::Fp8E4M3Row256)) failures += run_fp8_cases();
     failures += run_batch_cases();
     failures += run_dflash2_cases();
+#if defined(NINFER_SM75)
+    failures += run_a3_case(kGeometries[0], KvCacheStorage::Int8Group64,
+                            {1, 262143, 262144, 1901u}, MappingPattern::Fragmented);
+#endif
     std::cout << (failures == 0 ? "PASS" : "FAIL")
               << " causal_softmax_attention public-contract correctness\n";
     return failures == 0 ? 0 : 1;

@@ -3,6 +3,14 @@
 `build/apps/ninfer-serve` loads one v3 `.ninfer` artifact and exposes OpenAI- and
 Anthropic-compatible HTTP endpoints over one resident NInfer Engine.
 
+For RTX 8000, use the SM75 build and groupwise-int artifact with INT8 KV, not the
+NVFP4/FP8 example below. Device selection and the optional `--tensor-parallel-device` follow
+the [CLI placement contract](cli.md#rtx-8000-placement). The same Engine still admits one to
+eight active requests against primary-owned shared KV capacity. The secondary device does not
+pool VRAM, change HTTP request semantics, or increase configured concurrency.
+Current qualification and reproducible workloads are recorded
+[separately](performance/rtx8000-qwen3.8-27b.md).
+
 ## Start the server
 
 See [CUDA synchronization](cli.md#cuda-synchronization) for the shared `NINFER_CUDA_SYNC` setting.

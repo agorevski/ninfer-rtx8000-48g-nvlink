@@ -197,7 +197,9 @@ __launch_bounds__(kCausalPromptThreads, 1) __global__
 
     for (int kb = 0; kb < n_block_max; ++kb) {
         const int k0                 = kb * Bc;
-        const int next_physical_page = (kb + 1 < n_block_max) ? block_table[kb + 1] : physical_page;
+        const int next_physical_page = (kb + 1 < n_block_max)
+                                           ? block_table[((kb + 1) * Bc) >> kPagedKVPageShift]
+                                           : physical_page;
 
         ninfer::ops::cp_wait<0>(); // K(kb) landed (also publishes q_s / prev PV done)
         __syncthreads();

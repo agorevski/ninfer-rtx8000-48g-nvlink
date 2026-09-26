@@ -22,9 +22,20 @@ using LinearParameters = ops::SingleProjectionWeight;
     return static_cast<std::int32_t>(value);
 }
 
+struct TensorParallelDenseParameters {
+    // Gate on rank 0, up on rank 1; down is partitioned by output rows.
+    std::array<LinearParameters, 2> input;
+    std::array<LinearParameters, 2> down;
+};
+
+struct TensorParallelProjectionParameters {
+    std::array<LinearParameters, 2> ranks;
+};
+
 struct DenseParameters {
     LinearParameters gate_up;
     LinearParameters down;
+    std::optional<TensorParallelDenseParameters> tensor_parallel;
 };
 
 using FfnParameters = std::variant<DenseParameters, ops::SparseMoeWeights>;
@@ -33,6 +44,7 @@ struct AttentionParameters {
     ops::ProjectionWeights projection;
     Tensor query_norm, key_norm;
     LinearParameters output;
+    std::optional<TensorParallelProjectionParameters> tensor_parallel_output;
 };
 
 struct GdnParameters {
@@ -40,6 +52,7 @@ struct GdnParameters {
     ops::ProjectionWeights control;
     Tensor a_log, dt_bias, convolution, norm;
     LinearParameters output;
+    std::optional<TensorParallelProjectionParameters> tensor_parallel_output;
 };
 
 struct BlockParameters {
@@ -54,6 +67,7 @@ struct TextParameters {
     LinearParameters output_head;
     Tensor final_norm;
     std::vector<BlockParameters> layers;
+    std::optional<TensorParallelProjectionParameters> tensor_parallel_head;
 };
 
 struct MtpProjectionParameters {

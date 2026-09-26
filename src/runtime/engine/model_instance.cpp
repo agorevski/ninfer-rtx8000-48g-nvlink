@@ -19,6 +19,14 @@ void validate_options(const EngineOptions& options) {
     if (options.artifact_path.empty()) {
         throw std::invalid_argument("Engine artifact_path must not be empty");
     }
+    if (options.tensor_parallel_device &&
+        (*options.tensor_parallel_device < 0 || *options.tensor_parallel_device == options.device)) {
+        throw std::invalid_argument("tensor_parallel_device must name a distinct CUDA device");
+    }
+    if (options.tensor_parallel_device &&
+        (options.speculative.backend != SpeculativeBackend::None || options.enable_vision)) {
+        throw std::invalid_argument("tensor parallelism currently supports non-speculative text");
+    }
     if (options.artifact_path.extension() != ".ninfer") {
         throw std::invalid_argument("NInfer accepts only .ninfer artifacts");
     }

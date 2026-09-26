@@ -16,6 +16,7 @@ struct DeviceSpan {
 
 // Owning device allocation for long-lived buffers. DeviceArena remains the
 // suballocation primitive for workspaces; this type owns exactly one cudaMalloc.
+// Transfers and destruction restore the caller's device after selecting the allocation owner.
 class DeviceBuffer {
 public:
     DeviceBuffer() noexcept = default;
@@ -39,6 +40,7 @@ public:
 
 private:
     void require_range(std::size_t byte_offset, std::size_t count, const char* operation) const;
+    int device_ = -1;
 };
 
 class DeviceArena {
@@ -88,6 +90,7 @@ private:
     std::size_t off_  = 0;
     std::size_t peak_ = 0;
     bool owns_        = true;
+    int device_       = -1;
 };
 
 class PinnedHostBuffer {

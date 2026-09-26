@@ -19,6 +19,26 @@ auto with_context(const std::string& context, Function&& function) {
     }
 }
 
+LinearParameters peer_linear(const WeightParent& parent, ops::LinearPolicy policy) {
+    const WeightView view{parent.geometry.shape, {{&parent, 0, parent.geometry.elements}}};
+    return ops::prepare_linear_weight({view, policy, {}});
+}
+
+TensorParallelProjectionParameters split_projection(const ops::WeightInput& source,
+                                                     const WeightParent& upper) {
+    auto lower = source.weight;
+    const auto region = contiguous_weight_region(lower);
+    if (lower.shape.size() != 2 || lower.shape[0] % 2 != 0) {
+        throw std::invalid_argument("tensor parallel projection requires even output rows");
+    }
+    lower.shape[0] /= 2;
+    lower.parts = {
+        {region.parent, region.begin, region.begin + (region.end - region.begin) / 2}};
+    return {{ops::prepare_linear_weight(
+                 {lower, source.policy, source.activation_input_divisor}),
+             peer_linear(upper, source.policy)}};
+}
+
 class Prepare {
 public:
     explicit Prepare(const Model& model) : model_(model) {}
@@ -262,11 +282,35 @@ Parameters::Parameters(const Model& source) : model(source) {
     const auto& w        = model.weights();
     text.token_embedding = native_weight(model.weight(w.text.token_embedding).view);
     text.output_head     = prepare.linear(w.text.output_head_use);
+    if (model.options().tensor_parallel_device) {
+        if (!model.tensor_parallel_head()) {
+            throw std::logic_error("tensor parallel output head backing is absent");
+        }
+        text.tensor_parallel_head = split_projection(model.input(w.text.output_head_use),
+                                                       model.tensor_parallel_head()->parent);
+    }
     text.final_norm      = prepare.tensor(w.text.final_norm);
     text.layers.reserve(w.text.layers.size());
     for (std::size_t i = 0; i < w.text.layers.size(); ++i) {
         text.layers.push_back(with_context("text/layers/" + std::to_string(i),
                                            [&] { return prepare.block(w.text.layers[i]); }));
+        if (model.options().tensor_parallel_device) {
+            const auto& bound = std::get<DenseWeights>(w.text.layers[i].ffn);
+            const auto& peer = model.tensor_parallel_weights().at(i);
+            const auto down = model.input(bound.down);
+            auto& dense = std::get<DenseParameters>(text.layers.back().ffn);
+            auto gate = prepare.linear(bound.gate);
+            gate.policy = dense.gate_up.policy;
+            dense.tensor_parallel = TensorParallelDenseParameters{
+                {gate, peer_linear(peer.up->parent, dense.gate_up.policy)},
+                split_projection(down, peer.down->parent).ranks};
+            const auto output = std::visit([](const auto& mixer) { return mixer.output; },
+                                            w.text.layers[i].mixer);
+            std::visit([&](auto& mixer) {
+                mixer.tensor_parallel_output =
+                    split_projection(model.input(output), peer.output->parent);
+            }, text.layers.back().mixer);
+        }
     }
     if (w.mtp) {
         mtp = with_context("mtp", [&] { return prepare.mtp(*w.mtp); });

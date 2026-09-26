@@ -22,6 +22,12 @@ struct InstanceInfo {
 
 class LoadPlan;
 
+struct TensorParallelLayerWeights {
+    std::unique_ptr<artifact::MaterializedWeightRows> up;
+    std::unique_ptr<artifact::MaterializedWeightRows> down;
+    std::unique_ptr<artifact::MaterializedWeightRows> output;
+};
+
 class Model {
 public:
     ~Model();
@@ -46,6 +52,12 @@ public:
     [[nodiscard]] const FrontendResources& resources() const noexcept { return resources_; }
 
     [[nodiscard]] const InstanceInfo& info() const noexcept { return info_; }
+    [[nodiscard]] const std::vector<TensorParallelLayerWeights>& tensor_parallel_weights() const {
+        return tensor_parallel_weights_;
+    }
+    [[nodiscard]] const artifact::MaterializedWeightRows* tensor_parallel_head() const noexcept {
+        return tensor_parallel_head_.get();
+    }
 
     [[nodiscard]] const artifact::MaterializationStats& storage_stats() const noexcept {
         return backing_.stats();
@@ -56,6 +68,7 @@ private:
                                                     const StartupObserver*);
     Model(Config config, LoadOptions options, ModelWeights weights, std::vector<BoundWeight> bound,
           FrontendResources resources, InstanceInfo info, artifact::MaterializedArtifact backing);
+    void materialize_tensor_parallel(DeviceContext& primary);
 
     // Destroy all borrowers before backing. The caller keeps DeviceContext alive through cleanup.
     artifact::MaterializedArtifact backing_;
@@ -65,6 +78,8 @@ private:
     std::vector<BoundWeight> bound_;
     FrontendResources resources_;
     InstanceInfo info_;
+    std::vector<TensorParallelLayerWeights> tensor_parallel_weights_;
+    std::unique_ptr<artifact::MaterializedWeightRows> tensor_parallel_head_;
 };
 
 } // namespace ninfer::models::qwen3_5

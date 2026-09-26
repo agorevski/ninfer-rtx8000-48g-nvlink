@@ -12,6 +12,7 @@
 #include <cuda_bf16.h>
 
 #include <cstdint>
+#include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
@@ -94,6 +95,9 @@ void launch(const Tensor& x, const Weight& weight, Tensor& out, WorkspaceArena& 
 
 void nvfp4_linear_swiglu_w4a4_launch(const Tensor& x, const Weight& weight, Tensor& out,
                                      WorkspaceArena& workspace, cudaStream_t stream) {
+#if defined(NINFER_SM75)
+    throw std::invalid_argument("NVFP4 tensor-core SwiGLU projections require SM120a");
+#else
     if (x.ne[1] <= M64N128::kBlockM) {
         launch<M64N128>(x, weight, out, workspace, stream);
     } else if (x.ne[1] <= M96N128::kBlockM) {
@@ -101,6 +105,7 @@ void nvfp4_linear_swiglu_w4a4_launch(const Tensor& x, const Weight& weight, Tens
     } else {
         launch<M128N128>(x, weight, out, workspace, stream);
     }
+#endif
 }
 
 } // namespace ninfer::ops::detail

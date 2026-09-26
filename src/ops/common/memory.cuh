@@ -35,6 +35,15 @@ __device__ __forceinline__ unsigned smem_addr(const void* ptr) {
 template <int Bytes, Cache Policy = Cache::ca>
 __device__ __forceinline__ void cp_async(void* smem_dst, const void* gmem_src) {
     static_assert(Bytes == 4 || Bytes == 8 || Bytes == 16, "cp_async supports 4, 8, or 16 bytes");
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+    if constexpr (Bytes == 16) {
+        *static_cast<int4*>(smem_dst) = *static_cast<const int4*>(gmem_src);
+    } else if constexpr (Bytes == 8) {
+        *static_cast<int2*>(smem_dst) = *static_cast<const int2*>(gmem_src);
+    } else {
+        *static_cast<int*>(smem_dst) = *static_cast<const int*>(gmem_src);
+    }
+#else
     if constexpr (Policy == Cache::cg) {
         static_assert(Bytes == 16, "cp.async.cg requires a 16-byte copy");
         asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n"
@@ -45,6 +54,7 @@ __device__ __forceinline__ void cp_async(void* smem_dst, const void* gmem_src) {
                      :
                      : "r"(smem_addr(smem_dst)), "l"(gmem_src), "n"(Bytes));
     }
+#endif
 }
 
 template <int Bytes, Cache Policy = Cache::ca>
@@ -52,6 +62,17 @@ __device__ __forceinline__ void cp_async_zfill(void* smem_dst, const void* gmem_
                                                int src_bytes) {
     static_assert(Bytes == 4 || Bytes == 8 || Bytes == 16,
                   "cp_async_zfill supports 4, 8, or 16 bytes");
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+    if (src_bytes == Bytes) {
+        cp_async<Bytes, Policy>(smem_dst, gmem_src);
+    } else {
+#pragma unroll
+        for (int i = 0; i < Bytes; ++i) {
+            static_cast<unsigned char*>(smem_dst)[i] =
+                i < src_bytes ? static_cast<const unsigned char*>(gmem_src)[i] : 0;
+        }
+    }
+#else
     if constexpr (Policy == Cache::cg) {
         static_assert(Bytes == 16, "cp.async.cg requires a 16-byte copy");
         asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"
@@ -62,14 +83,21 @@ __device__ __forceinline__ void cp_async_zfill(void* smem_dst, const void* gmem_
                      :
                      : "r"(smem_addr(smem_dst)), "l"(gmem_src), "n"(Bytes), "r"(src_bytes));
     }
+#endif
 }
 
-__device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;\n"); }
+__device__ __forceinline__ void cp_commit() {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
+    asm volatile("cp.async.commit_group;\n");
+#endif
+}
 
 template <int Groups>
 __device__ __forceinline__ void cp_wait() {
     static_assert(Groups >= 0 && Groups <= 7, "cp_wait group count must fit the PTX immediate");
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
     asm volatile("cp.async.wait_group %0;\n" : : "n"(Groups));
+#endif
 }
 
 template <int Bytes>

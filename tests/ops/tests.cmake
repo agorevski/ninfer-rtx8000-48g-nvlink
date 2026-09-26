@@ -25,6 +25,11 @@ set(ninfer_op_tests
   scatter_bf16_batch
   target_logprobs
   position)
+if(CMAKE_CUDA_ARCHITECTURES STREQUAL "75")
+  ninfer_add_op_test(ninfer_turing_mma_test
+    SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_turing_mma.cu"
+    LIBRARIES ninfer_core)
+endif()
 foreach(op IN LISTS ninfer_op_tests)
   ninfer_add_op_test(ninfer_${op}_test
     SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_${op}.cpp"

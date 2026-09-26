@@ -179,6 +179,11 @@ void print_generation_summary(const ninfer::GenerationResult& result,
     const std::uint64_t reserved = static_cast<std::uint64_t>(memory.weights.capacity_bytes) +
                                    memory.runtime_reservation_bytes;
     print_metric("device", std::to_string(memory.device));
+    if (memory.tensor_parallel) {
+        print_metric("tensor parallel device", std::to_string(memory.tensor_parallel->device));
+        print_metric("peer weights", format_bytes(memory.tensor_parallel->weights.capacity_bytes));
+        print_metric("peer workspace", format_bytes(memory.tensor_parallel->workspace.capacity_bytes));
+    }
     print_metric("max context", std::to_string(memory.max_context));
     print_metric("KV capacity policy", format_kv_capacity_mode(memory.kv_capacity_mode));
     print_metric("KV capacity", std::to_string(memory.kv_capacity));
@@ -270,6 +275,7 @@ int main(int argc, char** argv) {
         engine_options.artifact_path      = cli.artifact_path;
         engine_options.chat_template_path = cli.chat_template_path;
         engine_options.device             = cli.device;
+        engine_options.tensor_parallel_device = cli.tensor_parallel_device;
         engine_options.max_context        = cli.max_context;
         engine_options.kv_capacity        = cli.kv_capacity;
         engine_options.prefill_chunk      = cli.prefill_chunk;

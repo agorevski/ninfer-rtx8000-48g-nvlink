@@ -11,6 +11,7 @@ struct LoadOptions {
     bool vision                    = false;
     SpeculativeBackend speculative = SpeculativeBackend::None;
     ProposalHead proposal_head     = ProposalHead::Full;
+    std::optional<int> tensor_parallel_device;
 
     bool operator==(const LoadOptions&) const = default;
 
@@ -56,7 +57,8 @@ struct LoadOptions {
     return {.purpose       = options.purpose,
             .vision        = options.enable_vision,
             .speculative   = options.speculative.backend,
-            .proposal_head = options.speculative.proposal_head};
+            .proposal_head = options.speculative.proposal_head,
+            .tensor_parallel_device = options.tensor_parallel_device};
 }
 
 } // namespace ninfer::models

@@ -1,4 +1,5 @@
 #include "core/weight.h"
+#include "ops/linear/turing.h"
 #include "ninfer/ops/linear_topk.h"
 
 #include "ops/linear/fp8/fp8_format.h"
@@ -36,6 +37,7 @@ bool overlaps(const Tensor& lhs, const Tensor& rhs) {
 }
 
 HeadProfile resolve_profile(QType qtype, std::int32_t head_rows, std::int32_t input_rows) {
+    detail::require_linear_weight_support(qtype, "linear_topk");
     if (input_rows != detail::kLinearTopKHidden) {
         throw std::invalid_argument("linear_topk: unsupported head profile");
     }

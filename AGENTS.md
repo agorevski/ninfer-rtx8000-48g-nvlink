@@ -27,12 +27,14 @@ approval requirements beyond the user's instructions and the actual execution en
 
 ## Product and architecture
 
-NInfer is a from-scratch C++/CUDA inference engine for maximum single-GPU performance. It implements
+NInfer is a from-scratch C++/CUDA inference engine for single-GPU and bounded two-GPU performance. It implements
 `Qwen3_5ForCausalLM` and `Qwen3_5MoeForCausalLM`; official Qwen3.6/3.8 artifacts and user recipes
-use the same architecture, binding and execution path. The implementation targets `sm_120a` and
-is tuned on NVIDIA GeForce RTX 5090.
+use the same architecture, binding and execution path. The implementation targets `sm_120a`
+(NVIDIA GeForce RTX 5090) and `sm_75` (Quadro RTX 8000) in separate builds. The RTX 8000
+dense text path can use a second peer-accessible GPU for intra-request FFN tensor parallelism.
 
-Generation uses one GPU, one resident model, startup-fixed concurrency of one to eight requests,
+Generation uses one primary GPU with optional bounded FFN tensor parallelism, one resident model,
+startup-fixed concurrency of one to eight requests,
 bounded FIFO ingress, no active-request preemption, and one compact decode batch per round.
 Generation and offline CausalScoring use the same public `.ninfer` Engine route. Delivered
 capabilities and commands are documented in `README.md`, the product guides, and executable

@@ -29,11 +29,10 @@ void launch_mma(const Weight& weight, Tensor& residual, Fp8A8Workspace workspace
     const Fp8ContiguousOutput destination{output, Geometry::kOutputRows};
 
     if constexpr (Schedule::kSharedBytes > 48 * 1024) {
-        static const cudaError_t attribute = cudaFuncSetAttribute(
+        CUDA_CHECK(configure_dynamic_shared_memory(
             fp8_mma_kernel<Geometry, Schedule, FullTokens, Fp8AddResidualEpilogue,
                            Fp8ContiguousOutput>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, Schedule::kSharedBytes);
-        CUDA_CHECK(attribute);
+            Schedule::kSharedBytes));
     }
     fp8_mma_kernel<Geometry, Schedule, FullTokens>
         <<<blocks, Schedule::kThreads, Schedule::kSharedBytes, stream>>>(
@@ -57,6 +56,9 @@ void launch_problem(const Weight& weight, Tensor& residual, Fp8A8Workspace works
 
 void fp8_linear_add_a8_launch(const Tensor& x, const Weight& weight, Tensor& residual,
                               WorkspaceArena& workspace, cudaStream_t stream) {
+#if defined(NINFER_SM75)
+    throw std::invalid_argument("FP8 tensor-core residual projections are unavailable on SM75");
+#else
     auto scope                   = workspace.scope();
     const Fp8A8Workspace scratch = allocate_fp8_a8_workspace(workspace, x.ne[1], weight.k);
     launch_fp8_a8_quantize(x, weight, scratch, stream);
@@ -74,6 +76,7 @@ void fp8_linear_add_a8_launch(const Tensor& x, const Weight& weight, Tensor& res
         break;
     }
     throw std::invalid_argument("fp8 linear_add: unsupported problem");
+#endif
 }
 
 } // namespace ninfer::ops::detail

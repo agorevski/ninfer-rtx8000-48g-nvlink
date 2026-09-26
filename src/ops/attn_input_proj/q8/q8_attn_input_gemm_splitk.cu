@@ -81,9 +81,10 @@ constexpr auto kTargetLaunchers =
 constexpr auto kCompanionLaunchers = make_companion_launchers(
     std::make_index_sequence<kLastCompanionExactCols - kFirstExactCols + 1>{});
 
-template <int TileCols, int KSplits, int NGroups, int MinBlocks>
+template <int TileCols, int RequestedKSplits, int NGroups, int MinBlocks>
 void launch_target_medium_cols(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
                                Tensor& k, Tensor& v, cudaStream_t stream) {
+    constexpr int KSplits = q8_physical_k_warps<RequestedKSplits, TileCols>;
     static_assert((4096 % kRowsPerCta) == 0 && (512 % kRowsPerCta) == 0);
     const TargetOutput output{
         static_cast<__nv_bfloat16*>(q.data), static_cast<__nv_bfloat16*>(k.data),
@@ -95,9 +96,10 @@ void launch_target_medium_cols(const Tensor& x, const Weight& weight, Tensor& q,
             static_cast<const std::uint8_t*>(weight.scales), output, x.ne[1]);
 }
 
-template <int TileCols, int KSplits, int NGroups, int MinBlocks>
+template <int TileCols, int RequestedKSplits, int NGroups, int MinBlocks>
 void launch_companion_medium_cols(const Tensor& x, const Weight& weight, Tensor& q, Tensor& k,
                                   Tensor& v, cudaStream_t stream) {
+    constexpr int KSplits = q8_physical_k_warps<RequestedKSplits, TileCols>;
     static_assert((4096 % kRowsPerCta) == 0 && (1024 % kRowsPerCta) == 0);
     const CompanionOutput output{static_cast<__nv_bfloat16*>(q.data),
                                  static_cast<__nv_bfloat16*>(k.data),

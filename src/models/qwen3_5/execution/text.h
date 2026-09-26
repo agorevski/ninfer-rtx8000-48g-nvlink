@@ -64,6 +64,7 @@ struct DFlashFeatureSink {
 };
 
 class VisionPrefillSession;
+class TensorParallelProjections;
 
 class TextContext {
 public:
@@ -87,6 +88,9 @@ public:
     }
 
     void set_sampling(const ops::SamplingConfig* config) noexcept { sampling_config_ = config; }
+    void set_tensor_parallel(TensorParallelProjections* execution) noexcept {
+        tensor_parallel_ = execution;
+    }
 
     void set_prefill_split_frontier(std::int64_t position) noexcept {
         prefill_split_frontier_ = position;
@@ -156,6 +160,7 @@ public:
                              const Tensor& position, ops::CausalAttentionExecutionEnvelope envelope,
                              Tensor& mtp_hidden, Tensor& logits, Tensor& draft_token);
 private:
+    TensorParallelProjections* tensor_parallel_ = nullptr;
     [[nodiscard]] bool mtp_enabled() const noexcept {
         return mtp_kv_.valid() || batch_mtp_kv_ != nullptr;
     }
@@ -242,7 +247,6 @@ private:
 
     const Weight* embed_                        = nullptr;
     const Tensor* final_norm_                   = nullptr;
-    const LinearParameters* lm_head_            = nullptr;
     const LinearParameters* proposal_head_      = nullptr;
     const std::int32_t* proposal_head_ids_      = nullptr;
     int proposal_head_n_                        = 0;

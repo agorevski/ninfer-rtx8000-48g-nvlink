@@ -48,10 +48,9 @@ void launch_variant(const Tensor& x, const Weight& weight, Tensor& residual, cud
                                         Geometry::kOutputRows};
 
     if constexpr (Schedule::kSharedBytes > 48 * 1024) {
-        static const cudaError_t attr = cudaFuncSetAttribute(
+        CUDA_CHECK(configure_dynamic_shared_memory(
             bf16_gemm_mma_kernel<Geometry, Schedule, FullTokens, Bf16LinearAddMmaOutput>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, Schedule::kSharedBytes);
-        CUDA_CHECK(attr);
+            Schedule::kSharedBytes));
     }
     bf16_gemm_mma_kernel<Geometry, Schedule, FullTokens>
         <<<blocks, Schedule::kThreads, Schedule::kSharedBytes, stream>>>(

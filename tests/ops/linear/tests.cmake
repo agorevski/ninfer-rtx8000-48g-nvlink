@@ -4,6 +4,15 @@ ninfer_test_includes(ninfer_linear_test_support)
 ninfer_op_oracle_options(ninfer_linear_test_support)
 target_link_libraries(ninfer_linear_test_support PUBLIC ninfer_ops)
 
+if(CMAKE_CUDA_ARCHITECTURES STREQUAL "75")
+  ninfer_add_op_test(ninfer_linear_turing_a16_test
+    SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_turing_a16.cpp"
+    LIBRARIES ninfer_linear_test_support)
+  ninfer_add_op_test(ninfer_linear_turing_batched_test
+    SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_turing_batched.cpp"
+    LIBRARIES ninfer_linear_test_support ninfer_linear_swiglu_test_support)
+endif()
+
 ninfer_add_op_test(ninfer_linear_q4_a16_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_q4_a16.cpp"
   LIBRARIES ninfer_linear_test_support)

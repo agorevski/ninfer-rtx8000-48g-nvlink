@@ -1,5 +1,6 @@
 #include "ops/linear/q6/q6_dispatch.h"
 #include "ops/linear/q6/q6_shapes.h"
+#include "ops/linear/turing.h"
 #include <array>
 #include <stdexcept>
 
@@ -32,6 +33,10 @@ Q6Launch select_q6_launch(std::int32_t n, std::int32_t k, std::int32_t t, Linear
 
 void q6_dispatch(const Tensor& x, const Weight& weight, Tensor& out, LinearPolicy policy,
                  cudaStream_t stream) {
-    select_q6_launch(weight.n, weight.k, x.ne[1], policy)(x, weight, out, stream);
+    const auto launch = select_q6_launch(weight.n, weight.k, x.ne[1], policy);
+#if defined(NINFER_SM75)
+    if (turing_linear(x, weight, out, stream)) return;
+#endif
+    launch(x, weight, out, stream);
 }
 } // namespace ninfer::ops::detail

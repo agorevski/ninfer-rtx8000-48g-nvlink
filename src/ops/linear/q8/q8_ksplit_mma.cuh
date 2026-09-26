@@ -172,15 +172,17 @@ q8_ksplit_mma(const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restric
             }
         }
         if constexpr (Schedule::kScaleAccess == Q8KSplitScaleAccess::Shared) {
-            constexpr int kScaleChunksPerRow = Schedule::kScaleBytesPerRow / 16;
+            constexpr int kScaleChunkBytes = Schedule::kScaleBytesPerRow < 16 ? 8 : 16;
+            constexpr int kScaleChunksPerRow = Schedule::kScaleBytesPerRow / kScaleChunkBytes;
             for (int item = tid; item < kMmaRows * kScaleChunksPerRow; item += kWarps * 32) {
                 const int row        = item / kScaleChunksPerRow;
                 const int chunk      = item - row * kScaleChunksPerRow;
                 const int weight_row = row_policy.weight_row(cta_row0, row);
-                cp_async<16, Schedule::kWeightCache>(
-                    &scale_shared[row][chunk * 16],
+                cp_async<kScaleChunkBytes,
+                         kScaleChunkBytes == 16 ? Schedule::kWeightCache : Cache::ca>(
+                    &scale_shared[row][chunk * kScaleChunkBytes],
                     scales + (static_cast<std::int64_t>(weight_row) * Geometry::kGroupsPerRow +
-                              group_k0 / 32 + chunk * 8) *
+                              group_k0 / 32 + chunk * (kScaleChunkBytes / 2)) *
                                  2);
             }
         }

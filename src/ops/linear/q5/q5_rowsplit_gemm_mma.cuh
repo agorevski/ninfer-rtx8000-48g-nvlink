@@ -17,6 +17,7 @@
 #include "ops/common/mma.cuh"
 #include "ops/common/bf16_vector.cuh"
 #include "ops/linear/q5/q5_rowsplit_storage.cuh"
+#include "ops/linear/turing_tile.cuh"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -113,7 +114,6 @@ void q5_rowsplit_gemm_mma_kernel(
     const std::uint8_t* __restrict__ codes,
     const std::uint8_t* __restrict__ high,
     const std::uint8_t* __restrict__ scales,
-    const __nv_bfloat16* __restrict__ residual,
     __nv_bfloat16* __restrict__ out,
     std::int32_t rows,
     std::int32_t k,
@@ -134,12 +134,16 @@ void q5_rowsplit_gemm_mma_kernel(
     constexpr int MT     = Schedule::kMmaRows;
     constexpr int NT     = Schedule::kMmaCols;
     constexpr int KSUB   = Schedule::kMmaKSteps;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
+    constexpr int S      = 1;
+#else
     constexpr int S      = Schedule::kPipelineStages;
+#endif
     constexpr int GPB    = Schedule::kGroupsPerK;
     constexpr int SB     = Schedule::kScaleBytes;
 
-    __shared__ __align__(16) __nv_bfloat16 As[BM * BK];
-    __shared__ __align__(16) __nv_bfloat16 Bs[S][BN * BK];
+    __shared__ __align__(16) A16Operand As[BM * BK];
+    __shared__ __align__(16) A16Operand Bs[S][BN * BK];
     __shared__ __align__(16) std::uint8_t Cr[S][BM * GPB * Q5RowSplitStorage::kCodeBytesPerGroup];
     __shared__ __align__(16) std::uint8_t Hr[S][BM * GPB * Q5RowSplitStorage::kHighBytesPerGroup];
     __shared__ __align__(16) std::uint8_t Sr[S][BM * GPB * SB];
@@ -168,6 +172,11 @@ void q5_rowsplit_gemm_mma_kernel(
         }
     }
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
+    turing_rowsplit_tile<5, BM, BN, WM, WN>(
+        x, codes, high, scales, As, Bs[0], accum, k, padded_k, cols, col0,
+        TuringLinearRows{row0, rows});
+#else
     const int k_tiles = padded_k / BK;
 
     const int a_matrix     = lane >> 3;
@@ -187,11 +196,11 @@ void q5_rowsplit_gemm_mma_kernel(
             const int col       = col0 + local_col;
             auto* dst = &Bs[stage][local_col * BK + q5_mma_swizzle_k64(local_col, k8 * 8)];
             if constexpr (kFull) {
-                cp_async<16, Schedule::kActivationCache>(
+                a16_stage_activation<Schedule::kActivationCache>(
                     dst, &x[static_cast<std::int64_t>(col) * k + kk]);
             } else {
                 if (col < cols && kk + 8 <= k) {
-                    cp_async<16, Schedule::kActivationCache>(
+                    a16_stage_activation<Schedule::kActivationCache>(
                         dst, &x[static_cast<std::int64_t>(col) * k + kk]);
                 } else {
                     store_vec(dst, make_int4(0, 0, 0, 0));
@@ -329,7 +338,7 @@ void q5_rowsplit_gemm_mma_kernel(
                                                         ? ((scale_group + group) & 1) *
                                                               Q5RowSplitStorage::kScaleBytesPerGroup
                                                         : 0)];
-                const __nv_bfloat162 weights = Q5MmaDecodeAtom::decode_pair(
+                const A16OperandPair weights = Q5MmaDecodeAtom::decode_pair(
                     Cr[stage], Hr[stage], scale_ptr, staged_group, lane);
                 const int shared_col =
                     q5_mma_swizzle_k64(local_row, group * Q5RowSplitStorage::kGroupK + 2 * lane);
@@ -382,7 +391,7 @@ void q5_rowsplit_gemm_mma_kernel(
                 for (int mi = 0; mi < MT; ++mi) {
 #pragma unroll
                     for (int ni = 0; ni < NT; ++ni) {
-                        mma_bf16(accum[mi][ni][0], accum[mi][ni][1], accum[mi][ni][2],
+                        a16_mma(accum[mi][ni][0], accum[mi][ni][1], accum[mi][ni][2],
                                  accum[mi][ni][3], a_frag[current][mi][0], a_frag[current][mi][1],
                                  a_frag[current][mi][2], a_frag[current][mi][3],
                                  b_frag[current][ni][0], b_frag[current][ni][1]);
@@ -399,7 +408,7 @@ void q5_rowsplit_gemm_mma_kernel(
                 for (int mi = 0; mi < MT; ++mi) {
 #pragma unroll
                     for (int ni = 0; ni < NT; ++ni) {
-                        mma_bf16(accum[mi][ni][0], accum[mi][ni][1], accum[mi][ni][2],
+                        a16_mma(accum[mi][ni][0], accum[mi][ni][1], accum[mi][ni][2],
                                  accum[mi][ni][3], a_frag[mi][0], a_frag[mi][1], a_frag[mi][2],
                                  a_frag[mi][3], b_frag[ni][0], b_frag[ni][1]);
                     }
@@ -413,9 +422,10 @@ void q5_rowsplit_gemm_mma_kernel(
         cp_commit();
     }
 
+#endif
     if constexpr (Epilogue == Q5MmaEpilogue::CtaCollectiveResidual) {
         static_assert(BM == BK, "Q5 collective residual reuses Bs and requires BM == BK");
-        __nv_bfloat16* projected_shared = Bs[0];
+        auto* projected_shared = reinterpret_cast<__nv_bfloat16*>(Bs[0]);
 #pragma unroll
         for (int mi = 0; mi < MT; ++mi) {
             const int local_row0 = warp_row * WM + mi * 16 + mma_row;
@@ -500,7 +510,7 @@ void q5_rowsplit_gemm_mma_kernel(
                 const float* values   = accum[mi][ni];
                 auto store_value      = [&](std::int64_t index, float value) {
                     if constexpr (Epilogue == Q5MmaEpilogue::AddResidual) {
-                        value = __bfloat162float(residual[index]) + value;
+                        value = __bfloat162float(out[index]) + value;
                     }
                     out[index] = __float2bfloat16_rn(value);
                 };

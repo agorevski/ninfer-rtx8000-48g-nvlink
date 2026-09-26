@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <utility>
+#include <stdexcept>
 
 namespace ninfer::ops::detail {
 using Nvfp4A4Launch = void (*)(const Weight&, Tensor&, Nvfp4W4a4Workspace, std::int32_t,
@@ -80,6 +81,9 @@ void launch_nvfp4_a16_chunks(const Tensor& x, const Weight& weight, Tensor& out,
 template <class Geometry, class Schedule>
 void launch_nvfp4_a4_mma(const Weight& weight, Tensor& out, Nvfp4W4a4Workspace workspace,
                          std::int32_t tokens, cudaStream_t stream) {
+#if defined(NINFER_SM75)
+    throw std::invalid_argument("NVFP4 tensor-core projections require SM120a");
+#else
     const dim3 grid(Geometry::kOutputRows / Schedule::kBlockN,
                     (tokens + Schedule::kBlockM - 1) / Schedule::kBlockM);
     const Nvfp4W4a4MaterializedActivation activation{workspace.codes, workspace.scales};
@@ -91,6 +95,7 @@ void launch_nvfp4_a4_mma(const Weight& weight, Tensor& out, Nvfp4W4a4Workspace w
         static_cast<const std::uint8_t*>(weight.scales), tokens, alpha, Nvfp4IdentityEpilogue{},
         output);
     CUDA_CHECK(cudaGetLastError());
+#endif
 }
 
 template <Nvfp4GeometryId Geometry>

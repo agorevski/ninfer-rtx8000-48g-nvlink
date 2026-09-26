@@ -43,6 +43,9 @@ namespace ninfer::ops {
  *   BlockScaleK16M128x4 [5120,6144] or [5120,17408], row-scaled
  *   FP8_E4M3FN_ROW_BF16 [5120,6144] or [5120,17408], or BF16 Contiguous [5120,6144]. T may
  *   be any positive value.
+ *   SM75 additionally admits Q5 RowSplit [2560,17408] dense FFN output-row shards
+ *   at every positive T.
+ *   The Q5 RowSplit [2560,6144] attention-output row shard admits exactly T=1.
  *
  * Numeric:
  *   The oracle reads a registered BF16 weight directly or exact-decodes a registered packed
@@ -65,7 +68,8 @@ namespace ninfer::ops {
  *
  * Workspace:
  *   Caller-owned transient storage reported by linear_add_workspace_capacity_bytes(), scoped to
- *   the call. A16 routes require no storage; quantized-activation routes use the reported capacity.
+ *   the call. SM75 Q4/Q5 prefill uses the reported private activation-cache capacity; other A16
+ *   routes require no storage. Quantized-activation routes use the reported capacity.
  *   There is no persistent state side effect.
  */
 void linear_add(const Tensor& x, const Weight& w, Tensor& residual, WorkspaceArena& ws,

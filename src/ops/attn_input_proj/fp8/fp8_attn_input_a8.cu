@@ -10,6 +10,7 @@
 #include <cuda_bf16.h>
 
 #include <cstdint>
+#include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
@@ -52,6 +53,9 @@ void run(const Weight& weight, Tensor& q, Tensor& gate, Tensor& k, Tensor& v,
 
 void fp8_attn_input_a8_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
                               Tensor& k, Tensor& v, Fp8A8Workspace workspace, cudaStream_t stream) {
+#if defined(NINFER_SM75)
+    throw std::invalid_argument("FP8 tensor-core attention projections are unavailable on SM75");
+#else
     launch_fp8_a8_quantize(x, weight, workspace, stream);
     // This Op owns its tile choices; the generic Linear schedules do not describe four-output
     // projection's short-column cost. All variants share the same activation representation.
@@ -79,5 +83,6 @@ void fp8_attn_input_a8_launch(const Tensor& x, const Weight& weight, Tensor& q, 
         run<Tail144>(weight, q, gate, k, v, workspace, x.ne[1], stream);
     else
         run<Prefill>(weight, q, gate, k, v, workspace, x.ne[1], stream);
+#endif
 }
 } // namespace ninfer::ops::detail

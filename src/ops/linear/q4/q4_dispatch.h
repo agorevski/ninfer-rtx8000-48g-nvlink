@@ -12,6 +12,6 @@ Q4Launch select_q4_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t);
 Q4Launch select_q4_launch(std::int32_t n, std::int32_t k, std::int32_t t, LinearPolicy policy);
 
 void q4_dispatch(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
-                 cudaStream_t stream);
+                 cudaStream_t stream, WorkspaceArena* workspace = nullptr);
 
 } // namespace ninfer::ops::detail

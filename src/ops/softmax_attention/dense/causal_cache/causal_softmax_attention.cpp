@@ -58,7 +58,17 @@ void require_contiguous_nonnull(const Tensor& tensor, const char* op, const char
     }
 }
 
+void require_supported_cache(KvCacheStorage storage) {
+#if defined(NINFER_SM75)
+    if (storage != KvCacheStorage::BFloat16 && storage != KvCacheStorage::Int8Group64) {
+        throw std::invalid_argument(
+            "causal_softmax_attention: SM75 supports BF16 or INT8 group64 KV storage");
+    }
+#endif
+}
+
 std::uint32_t validate_cache(const PagedKVLayerView& cache, std::int32_t kv_heads, const char* op) {
+    require_supported_cache(cache.storage);
     PagedKVStorageLayout layout{};
     try {
         layout = paged_kv_storage_layout(cache.storage, kHeadDim);
@@ -116,6 +126,7 @@ std::uint32_t validate_cache(const PagedKVLayerView& cache, std::int32_t kv_head
 
 std::uint32_t validate_batch_cache(const PagedKVBatchLayerView& cache, std::int32_t kv_heads,
                                    const char* op) {
+    require_supported_cache(cache.storage);
     PagedKVStorageLayout layout{};
     try {
         layout = paged_kv_storage_layout(cache.storage, kHeadDim);
@@ -398,6 +409,7 @@ std::size_t causal_softmax_attention_workspace_capacity_bytes(
     CausalAttentionExecutionEnvelope envelope, std::int32_t batch_size, std::int32_t min_width,
     std::int32_t max_width) {
     require_causal_geometry(geometry, "causal_softmax_attention workspace");
+    require_supported_cache(cache_storage);
     const std::int32_t q_heads = geometry.query_heads;
     bool supported_dtype       = true;
     try {

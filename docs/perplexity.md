@@ -5,6 +5,11 @@ It uses the artifact's tokenizer, Text model, selected Main KV representation, f
 and main output head. It is an offline evaluator, not a serving endpoint or a logits-export API.
 Only Text weights and resources are loaded; Vision and speculative components are not required.
 
+The SM75 build supports BF16 and INT8 group-64 Main KV storage and defaults to INT8.
+Use the groupwise-int artifact on RTX 8000. `--device` and `--tensor-parallel-device` select
+the same [primary/secondary placement](cli.md#rtx-8000-placement) as generation; scoring does
+not bypass that execution path.
+
 ## Run the fixed corpus
 
 The repository includes `ninfer-ppl-1m-v1`, a fixed set of 16 independent UTF-8 streams covering
@@ -65,6 +70,12 @@ retaining up to `context-stride` preceding tokens as local context. Streams neve
 For a numerical comparison, keep the corpus, context, stride, and execution settings fixed except
 the variable being measured. Compare KV formats with the same artifact and weight formats with the
 same KV format.
+
+When comparing another runtime, match physical storage rather than the option label alone:
+NInfer's `bf16` cache stores BF16 keys and FP16 values. A reference using BF16 for both does
+not isolate weight or runtime differences. The
+[paired scoring tools](../bench/README.md#paired-causal-score-comparison) additionally align
+exact token IDs, window resets, and target positions.
 
 The corpus name is a workload scale, not an exact token count. Exact input and scored-token counts
 are runtime results from the current artifact tokenizer and are recorded in each report. Reports

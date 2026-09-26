@@ -11,6 +11,8 @@
 #include "ops/common/mma.cuh"
 #include "ops/common/math.cuh"
 #include "ops/common/memory.cuh"
+#include "ops/linear/a16_operand.cuh"
+#include "ops/linear/turing_tile.cuh"
 #include "ops/linear/q8/q8_rowsplit_output.cuh"
 
 #include <cuda_bf16.h>
@@ -23,6 +25,11 @@ namespace ninfer::ops::detail {
 union alignas(16) Q8Bf16x8Bits {
     uint4 raw;
     __nv_bfloat162 pair[4];
+};
+
+union alignas(16) Q8A16x8Bits {
+    uint4 raw;
+    A16OperandPair pair[4];
 };
 
 static_assert(sizeof(Q8Bf16x8Bits) == 16);
@@ -91,7 +98,14 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q8_rowsplit_gem
     std::int32_t n, std::int32_t padded_k) {
     constexpr int BM                = Cfg::BM;
     constexpr int BN                = Cfg::BN;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
+    constexpr int BK                = 64;
+    constexpr int ActivationStages =
+        Epilogue == Q8Epilogue::SwiGluSplitHalf && Cfg::WARPS_M == 2 ? (BM + 63) / 64 : 1;
+#else
     constexpr int BK                = Cfg::BK;
+    constexpr int ActivationStages  = Cfg::ACTIVATION_STAGES;
+#endif
     constexpr int WM                = Cfg::WM;
     constexpr int WN                = Cfg::WN;
     constexpr int MT                = Cfg::MT;
@@ -104,10 +118,12 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q8_rowsplit_gem
                   "SwiGLU supports warp-local or shared-memory row pairing");
 
     struct OperandStorage {
-        alignas(16) __nv_bfloat16 weights[BM * BK];
-        alignas(16) __nv_bfloat16 activations[Cfg::ACTIVATION_STAGES][BN * BK];
+        alignas(16) A16Operand weights[BM * BK];
+        alignas(16) A16Operand activations[ActivationStages][BN * BK];
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ != 750
         alignas(16) std::uint8_t codes[BM * BK];
         alignas(16) std::uint8_t scales[BM * Cfg::SCALE_CACHE_BYTES];
+#endif
     };
 
     union SharedStorage {
@@ -119,8 +135,10 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q8_rowsplit_gem
     __shared__ __align__(16) SharedStorage shared;
     auto& As = shared.operands.weights;
     auto& Bs = shared.operands.activations;
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ != 750
     auto& Cr = shared.operands.codes;
     auto& Sr = shared.operands.scales;
+#endif
 
     const int tid  = static_cast<int>(threadIdx.x);
     const int warp = tid >> 5;
@@ -147,6 +165,20 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q8_rowsplit_gem
         }
     }
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
+    if constexpr (kSwiGlu) {
+        turing_rowsplit_tile<8, BM, BN, WM, WN>(
+            x, codes, nullptr, scales, As, Bs[0], acc, k, padded_k, n, n0,
+            TuringPairedRows<BM / 2>{m0, m / 2});
+    } else {
+        constexpr bool ReuseEpilogue =
+            sizeof(SharedStorage) >= sizeof(OperandStorage) + BN * 8 + BM * 2;
+        auto* exceptions = reinterpret_cast<std::uint8_t*>(&shared) + sizeof(OperandStorage);
+        turing_rowsplit_tile<8, BM, BN, WM, WN, ReuseEpilogue>(
+            x, codes, nullptr, scales, As, Bs[0], acc, k, padded_k, n, n0,
+            TuringLinearRows{m0, m}, exceptions);
+    }
+#else
     const int a_mat    = lane >> 3;
     const int a_rin    = lane & 7;
     const int a_rowoff = a_rin + ((a_mat & 1) << 3);
@@ -164,12 +196,12 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q8_rowsplit_gem
             const int nn = n0 + nl;
             auto* dst    = &Bs[stage][nl * BK + q8_g32_swz64(nl, k8 * 8)];
             if constexpr (Full) {
-                cp_async<16, Cache::cg>(dst, &x[static_cast<std::int64_t>(nn) * k + kk]);
+                a16_stage_activation<Cache::cg>(dst, &x[static_cast<std::int64_t>(nn) * k + kk]);
             } else {
                 const int valid = (nn < n && kk < k) ? min(8, k - kk) * 2 : 0;
-                ninfer::ops::cp_async_zfill<16, Cfg::kPredicatedCache>(
+                a16_stage_activation<Cfg::kPredicatedCache>(
                     dst, &x[static_cast<std::int64_t>(nn < n ? nn : 0) * k + (kk < k ? kk : 0)],
-                    valid);
+                    valid / 2);
             }
         }
     };
@@ -235,14 +267,14 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q8_rowsplit_gem
                 __half2float(__ushort_as_half(*reinterpret_cast<const std::uint16_t*>(
                     &Sr[row * Cfg::SCALE_CACHE_BYTES + scale_tile_offset + gg * 2])));
             const uint2 packed = *reinterpret_cast<const uint2*>(&Cr[row * BK + col]);
-            Q8Bf16x8Bits decoded;
+            Q8A16x8Bits decoded;
 #pragma unroll
             for (int pair = 0; pair < 4; ++pair) {
                 const unsigned word = (pair < 2 ? packed.x : packed.y) >> ((pair & 1) * 16);
                 const int q0        = static_cast<int>(static_cast<std::int8_t>(word & 0xffu));
                 const int q1 = static_cast<int>(static_cast<std::int8_t>((word >> 8) & 0xffu));
-                decoded.pair[pair] = __floats2bfloat162_rn(static_cast<float>(q0) * scale,
-                                                           static_cast<float>(q1) * scale);
+                decoded.pair[pair] =
+                    a16_operand_pair(static_cast<float>(q0) * scale, static_cast<float>(q1) * scale);
             }
             store_vec(&As[row * BK + q8_g32_swz64(row, col)], decoded.raw);
         }
@@ -300,7 +332,7 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q8_rowsplit_gem
             for (int mi = 0; mi < MT; ++mi) {
 #pragma unroll
                 for (int ni = 0; ni < NT; ++ni) {
-                    mma_bf16(acc[mi][ni][0], acc[mi][ni][1], acc[mi][ni][2], acc[mi][ni][3],
+                    a16_mma(acc[mi][ni][0], acc[mi][ni][1], acc[mi][ni][2], acc[mi][ni][3],
                              af[slot][mi][0], af[slot][mi][1], af[slot][mi][2], af[slot][mi][3],
                              bf[slot][ni][0], bf[slot][ni][1]);
                 }
@@ -316,6 +348,7 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q8_rowsplit_gem
         }
     }
 
+#endif
     if constexpr (kSwiGlu) {
         if constexpr (Cfg::WARPS_M == 1) {
             static_assert((MT % 2) == 0);
@@ -361,7 +394,7 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q8_rowsplit_gem
             }
         } else {
             static_assert(Cfg::WARPS_M == 2);
-            static_assert(BM <= Cfg::ACTIVATION_STAGES * BK,
+            static_assert(BM <= ActivationStages * BK,
                           "FP32 up tile must fit in the activation staging storage");
             auto* up_shared = reinterpret_cast<float*>(Bs);
             __syncthreads();

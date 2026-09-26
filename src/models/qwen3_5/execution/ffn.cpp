@@ -1,4 +1,5 @@
 #include "models/qwen3_5/execution/ffn.h"
+#include "models/qwen3_5/execution/tensor_parallel.h"
 
 #include "core/layout.h"
 #include "ninfer/ops/linear.h"
@@ -19,6 +20,9 @@ std::size_t ffn_workspace_bytes(const FfnParameters& parameters, std::int32_t fi
                                                         moe->routed_down.qtype, first, last);
     }
     const auto& p    = std::get<DenseParameters>(parameters);
+    if (p.tensor_parallel && !mtp) {
+        return tensor_parallel_ffn_workspace_bytes(*p.tensor_parallel, 0, first, last);
+    }
     const auto& gu   = p.gate_up.weight;
     const auto& down = p.down.weight;
     WorkspaceLayoutBuilder layout;

@@ -150,6 +150,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True, help="benchmark output directory")
     parser.add_argument("--port", type=int, default=8080, help="loopback serving port")
     parser.add_argument("--device", type=int, default=0, help="CUDA device index")
+    parser.add_argument("--tensor-parallel-device", type=int,
+                        help="second CUDA ordinal for tensor parallelism")
     parser.add_argument(
         "--dry-run", action="store_true", help="print point commands and request counts only"
     )
@@ -161,6 +163,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise corpus.CampaignError("--port must be in [1, 65535]")
     if args.device < 0:
         raise corpus.CampaignError("--device must be nonnegative")
+    if args.tensor_parallel_device is not None and (
+        args.tensor_parallel_device < 0 or args.tensor_parallel_device == args.device
+    ):
+        raise corpus.CampaignError("--tensor-parallel-device must be nonnegative and distinct")
     if args.max_context <= 0:
         raise corpus.CampaignError("--max-context must be positive")
     if args.decode_tokens <= 0:
@@ -308,6 +314,8 @@ def server_command(
         "int8",
         "--no-prefix-reuse",
     ]
+    if args.tensor_parallel_device is not None:
+        command.extend(["--tensor-parallel-device", str(args.tensor_parallel_device)])
     if point.speculative_backend != "none":
         command.extend(
             [

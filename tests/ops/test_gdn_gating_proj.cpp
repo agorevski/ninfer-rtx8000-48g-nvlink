@@ -13,6 +13,7 @@
 #include <initializer_list>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 using namespace ninfer;
@@ -484,7 +485,12 @@ int verify_workspace_capacity_contract(const Geometry& geometry,
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    const bool prefill_only = argc == 2 && std::string_view(argv[1]) == "--prefill-only";
+    if (argc != 1 && !prefill_only) {
+        std::cerr << "usage: ninfer_gdn_gating_proj_test [--prefill-only]\n";
+        return 2;
+    }
     if (cuda_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
@@ -494,6 +500,19 @@ int main() {
     const DeviceExecutionView execution{nullptr, device.multiprocessor_count()};
     const DeviceExecutionView norm_execution{device.stream, device.multiprocessor_count()};
     int failures = 0;
+    for (const int tokens : {383, 384, 385, 511, 512, 513, 1024, 2048}) {
+        failures += run_projection_case(kQwen38Parent, tokens, 0x8800u + tokens, execution);
+    }
+    for (const int tokens : {512, 1024, 2048}) {
+        failures +=
+            run_norm_projection_case(kQwen38Parent, tokens, 0x9800u + tokens, norm_execution);
+        failures +=
+            run_norm_projection_case(kQwen38Parent, tokens, 0xa800u + tokens, norm_execution, true);
+    }
+    if (prefill_only) {
+        std::cout << (failures == 0 ? "OK" : "FAIL") << " gdn_gating_proj prefill correctness\n";
+        return failures == 0 ? 0 : 1;
+    }
     failures += verify_workspace_capacity_contract(kQwen27, {1, 8, 1024, 2048, 4096, 4097});
     failures += verify_workspace_capacity_contract(kQwen35, {1, 127, 1024, 2048, 4096, 4097});
 

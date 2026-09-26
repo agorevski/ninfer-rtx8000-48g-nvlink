@@ -16,6 +16,9 @@ void launch_fp8_partial(const Tensor& q, CacheInput input, const Tensor& positio
                         PagedKVBatchLayerView cache, const CausalSmallTInvocation& invocation,
                         std::int32_t logical_capacity, std::int32_t splits, Tensor& partial_acc,
                         Tensor& partial_m, Tensor& partial_l, cudaStream_t stream) {
+#if defined(NINFER_SM75)
+    throw std::invalid_argument("FP8 causal attention is not supported on SM75; use INT8 group64");
+#else
     constexpr int RowCount             = TokenTile * Geometry::GroupSize;
     constexpr int RowTiles             = (RowCount + 15) / 16;
     constexpr int Warps                = RowTiles == 3 ? 12 : 8;
@@ -27,8 +30,8 @@ void launch_fp8_partial(const Tensor& q, CacheInput input, const Tensor& positio
     const auto launch = [&]() {
         auto kernel = causal_attention_small_t_fp8_tiled_kernel<
             Geometry, TokenTile, Warps, MinBlocks, KeyBlock, true, MultiBatch, Masked, KernelInput>;
-        static const cudaError_t attr = cudaFuncSetAttribute(
-            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(DynamicBytes));
+        const cudaError_t attr =
+            configure_dynamic_shared_memory(kernel, static_cast<int>(DynamicBytes));
         CUDA_CHECK(attr);
 
         const auto q_ptr         = static_cast<const __nv_bfloat16*>(q.data);
@@ -57,6 +60,7 @@ void launch_fp8_partial(const Tensor& q, CacheInput input, const Tensor& positio
     };
 
     launch();
+#endif
 }
 
 template <typename Geometry, bool MultiBatch, bool Masked>

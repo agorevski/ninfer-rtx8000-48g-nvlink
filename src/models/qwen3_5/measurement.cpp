@@ -22,6 +22,10 @@ std::string prefill_signature(const Model& model) {
                {"num_hidden_layers", t.num_hidden_layers},
                {"rms_norm_eps", t.rms_norm_eps},
                {"layer_types", t.layer_types}};
+    if (model.options().tensor_parallel_device) {
+        facts["ffn_execution"] = "dual-gate-up-output-rows-1";
+        facts["output_execution"] = "dual-output-rows-t1-1";
+    }
     if (t.attention) {
         const auto& a      = *t.attention;
         facts["attention"] = {a.num_attention_heads, a.num_key_value_heads, a.head_dim};

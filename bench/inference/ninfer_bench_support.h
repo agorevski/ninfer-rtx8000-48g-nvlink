@@ -15,7 +15,7 @@
 
 namespace ninfer::bench {
 
-inline constexpr int kSchemaVersion                   = 15;
+inline constexpr int kSchemaVersion                   = 16;
 inline constexpr std::string_view kArtifactType       = "ninfer_bench_report";
 inline constexpr std::string_view kDefaultCorpusPath  = "bench/fixtures/bench_corpus.ids";
 inline constexpr int kDecodeSeedTokens                = 1;
@@ -61,9 +61,10 @@ struct BenchOptions {
     int warmup      = kDefaultWarmup;
     std::optional<std::uint32_t> max_context;
     std::uint32_t prefill_chunk = kDefaultPrefillChunk;
-    KvCacheStorage kv_cache     = KvCacheStorage::BFloat16;
+    KvCacheStorage kv_cache     = kDefaultKvCacheStorage;
     SpeculativeOptions speculative;
     int device            = 0;
+    std::optional<int> tensor_parallel_device;
     bool use_cuda_graph   = true;
     bool profile_measured = false;
     OutputFormat output   = OutputFormat::Table;
@@ -82,6 +83,7 @@ struct TestResult {
     std::vector<RepTiming> reps;
     std::size_t workspace_peak_bytes           = 0;
     std::size_t workspace_allocator_peak_bytes = 0;
+    std::optional<std::size_t> tensor_parallel_workspace_peak_bytes;
 };
 
 struct Stats {
@@ -95,6 +97,7 @@ struct BenchEnvironment {
     std::string cuda_runtime_version;
     std::string cuda_driver_version;
     int device_id = 0;
+    std::optional<int> tensor_parallel_device;
 
     std::string artifact_path;
     std::uint64_t artifact_file_size_bytes = 0;
@@ -103,7 +106,7 @@ struct BenchEnvironment {
 
     std::uint32_t max_context   = 0;
     std::uint32_t prefill_chunk = kDefaultPrefillChunk;
-    KvCacheStorage kv_cache     = KvCacheStorage::BFloat16;
+    KvCacheStorage kv_cache     = kDefaultKvCacheStorage;
     SpeculativeOptions speculative;
     bool use_cuda_graph                            = true;
     bool decode_graph_primed                       = false;

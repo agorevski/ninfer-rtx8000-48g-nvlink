@@ -137,11 +137,11 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
         constexpr std::size_t kDynamicBytes =
             DynamicArena ? static_cast<std::size_t>(4 * KeyBlock * kCausalHeadDim) : 0u;
         if constexpr (DynamicArena) {
-            static const cudaError_t attr = cudaFuncSetAttribute(
+            const cudaError_t attr = configure_dynamic_shared_memory(
                 causal_attention_small_t_i8_tiled_kernel<Geometry, TokenTile, WarpsPerCta,
                                                          MinBlocksPerSm, KeyBlock, DynamicArena,
                                                          MultiBatch, Masked, CacheInput>,
-                cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(kDynamicBytes));
+                static_cast<int>(kDynamicBytes));
             CUDA_CHECK(attr);
         }
         causal_attention_small_t_i8_tiled_kernel<Geometry, TokenTile, WarpsPerCta, MinBlocksPerSm,
@@ -163,6 +163,13 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
                 logical_capacity, scale, static_cast<float*>(partial_acc.data),
                 static_cast<float*>(partial_m.data), static_cast<float*>(partial_l.data));
     };
+#if defined(NINFER_SM75)
+    if constexpr (TokenTile * Geometry::GroupSize > 32) {
+        launch.template operator()<6, 1, 32, false>();
+    } else {
+        launch.template operator()<8, 1, 32, false>();
+    }
+#else
     if constexpr (TokenTile >= 6) {
         // Small grids need more warps per CTA. From 2K to 8K, Bc=64 halves key
         // loop iterations; dynamic smem avoids penalizing the long-context path.
@@ -208,6 +215,7 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
     } else {
         launch.template operator()<8, 2, 32, false>();
     }
+#endif
     CUDA_CHECK(cudaGetLastError());
 }
 

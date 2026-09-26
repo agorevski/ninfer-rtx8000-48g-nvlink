@@ -9,6 +9,7 @@
 #include "ops/linear_add/fp8/fp8_linear_add_plan.h"
 #include "ops/linear_add/nvfp4/nvfp4_linear_add_plan.h"
 #include "ops/linear_add/q4/q4_linear_add_dispatch.h"
+#include "ops/linear/turing.h"
 #include "ops/linear_add/q5/q5_linear_add_plan.h"
 #include "ops/linear_add/q8/q8_linear_add_plan.h"
 
@@ -92,10 +93,21 @@ std::size_t linear_add_workspace_capacity_bytes(QType qtype, std::int32_t output
 std::size_t linear_add_workspace_capacity_bytes(QType qtype, std::int32_t output_rows,
                                                 std::int32_t input_rows, LinearPolicy policy,
                                                 std::int32_t min_tokens, std::int32_t max_tokens) {
+    detail::require_linear_weight_support(qtype, "linear_add workspace");
     validate_policy(policy);
     if (min_tokens <= 0 || max_tokens < min_tokens) {
         throw std::invalid_argument("linear_add workspace: invalid token interval");
     }
+#if defined(NINFER_SM75)
+    if (qtype == QType::Q5_G64_FP16 && output_rows == 2560 && input_rows == 6144) {
+        if (min_tokens != 1 || max_tokens != 1)
+            throw std::invalid_argument("linear_add output row shard: only T=1 is supported");
+        return 0;
+    }
+    if (qtype == QType::Q5_G64_FP16 && output_rows == 2560 && input_rows == 17408)
+        return detail::turing_linear_workspace_capacity_bytes(qtype, input_rows, min_tokens,
+                                                               max_tokens);
+#endif
     if (qtype == QType::BF16) {
         (void)detail::bf16_linear_add_select(output_rows, input_rows, min_tokens);
         (void)detail::bf16_linear_add_select(output_rows, input_rows, max_tokens);
@@ -104,7 +116,12 @@ std::size_t linear_add_workspace_capacity_bytes(QType qtype, std::int32_t output
     if (qtype == QType::Q4_G64_FP16) {
         (void)detail::select_q4_linear_add(output_rows, input_rows, min_tokens);
         (void)detail::select_q4_linear_add(output_rows, input_rows, max_tokens);
+#if defined(NINFER_SM75)
+        return detail::turing_linear_workspace_capacity_bytes(qtype, input_rows, min_tokens,
+                                                               max_tokens);
+#else
         return 0;
+#endif
     }
     if (qtype == QType::Q8_G32_FP16) {
         (void)detail::q8_linear_add_resolve_plan({output_rows, input_rows, input_rows, min_tokens});
@@ -112,8 +129,15 @@ std::size_t linear_add_workspace_capacity_bytes(QType qtype, std::int32_t output
         return 0;
     }
     if (qtype == QType::Q5_G64_FP16) {
-        return detail::q5_linear_add_capacity_workspace_bytes(output_rows, input_rows, input_rows,
-                                                              min_tokens, max_tokens);
+        const auto capacity = detail::q5_linear_add_capacity_workspace_bytes(
+            output_rows, input_rows, input_rows, min_tokens, max_tokens);
+#if defined(NINFER_SM75)
+        (void)capacity;
+        return detail::turing_linear_workspace_capacity_bytes(qtype, input_rows, min_tokens,
+                                                               max_tokens);
+#else
+        return capacity;
+#endif
     }
     if (qtype == QType::NVFP4) {
         const bool supported = (output_rows == detail::Nvfp4N5120K6144::kOutputRows &&
@@ -147,6 +171,7 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, Workspac
 
 void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPolicy policy,
                 WorkspaceArena& ws, cudaStream_t stream) {
+    detail::require_linear_weight_support(w.qtype, "linear_add");
     validate_policy(policy);
     const std::int32_t t = x.ne[1];
     if (t <= 0) { throw std::invalid_argument("linear_add: T must be positive"); }
@@ -179,26 +204,37 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPo
             throw std::invalid_argument(
                 "linear_add: Q4 requires 16-byte x/residual/code/scale alignment");
         }
+#if defined(NINFER_SM75)
+        if (detail::turing_linear_add(x, w, residual_out, stream, &ws)) return;
+#endif
         launch(x, w, residual_out, stream);
         return;
     }
 
     if (w.qtype == QType::Q5_G64_FP16) {
         require_q5(w);
-        const bool supported_shape = (w.n == 5120 && w.k == 17408) || (w.n == 5120 && w.k == 6144);
+        bool supported_shape = (w.n == 5120 && w.k == 17408) || (w.n == 5120 && w.k == 6144);
+#if defined(NINFER_SM75)
+        supported_shape = supported_shape || (w.n == 2560 && w.k == 17408) ||
+                          (w.n == 2560 && w.k == 6144 && t == 1);
+#endif
         if (!supported_shape) { throw std::invalid_argument("linear_add: unsupported Q5 shape"); }
         if (!aligned_to(x.data, 16) || !aligned_to(residual_out.data, 16) ||
             !aligned_to(w.qdata, 16) || !aligned_to(w.qhigh, 16) || !aligned_to(w.scales, 16)) {
             throw std::invalid_argument(
                 "linear_add: Q5 requires 16-byte x/residual/code/high/scale alignment");
         }
+#if defined(NINFER_SM75)
+        if (detail::turing_linear_add(x, w, residual_out, stream, &ws)) return;
+#endif
         detail::q5_linear_add_dispatch(x, w, residual_out, ws, stream);
         return;
     }
 
     if (w.qtype == QType::Q8_G32_FP16) {
         require_q8(w);
-        if (!detail::q8_linear_add_admits({w.n, w.k, w.padded_shape[1], t})) {
+        const bool supported_shape = detail::q8_linear_add_admits({w.n, w.k, w.padded_shape[1], t});
+        if (!supported_shape) {
             throw std::invalid_argument("linear_add: unsupported Q8 shape");
         }
         if (!aligned_to(x.data, 16) || !aligned_to(residual_out.data, 16) ||
@@ -207,6 +243,9 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPo
                 "linear_add: Q8 requires 16-byte x/residual/code/scale alignment");
         }
         (void)ws;
+#if defined(NINFER_SM75)
+        if (detail::turing_linear_add(x, w, residual_out, stream, &ws)) return;
+#endif
         detail::q8_linear_add_dispatch(x, w, residual_out, stream);
         return;
     }

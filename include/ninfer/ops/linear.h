@@ -81,6 +81,11 @@ enum class LinearPolicy : std::uint8_t {
  * every positive column extent T. Registered Vision problems accept raw-patch P in
  * `{4,8,...,131072}` or merged-token V in `[1,32768]`; a matrix column does not inherently
  * represent a text token. FP32 is unsupported.
+ * SM75 additionally registers the dense FFN gate/up row-shard profile Q4 `[17408,5120]`
+ * at every positive T.
+ * Its Q8 vocabulary-head row-shard profile `[124160,5120]` admits exactly T=1.
+ * SM75 projection Ops admit BF16 and groupwise integer weights only; FP8/NVFP4 weight
+ * profiles are rejected by workspace queries and execution before any device mutation.
  *
  * @par Numerical contract
  * Test fixture code materializes the persistent weight as its logical FP32 dequantized matrix.
@@ -109,6 +114,8 @@ enum class LinearPolicy : std::uint8_t {
  * `workspace` is caller-owned call-scoped transient storage sized by
  * linear_workspace_capacity_bytes(). It must not overlap x, any weight plane, or out. Linear does
  * not allocate device memory internally.
+ * SM75 Q4/Q5 prefill may cache private FP16 activations and range-correction masks in this
+ * workspace. The workspace-free convenience overload retains its direct-staging A16 route.
  *
  * @param[in] x Contiguous, non-null, 16-byte-aligned BF16 input matrix `[K,T]`.
  * @param[in] w Logical weight matrix `[N,K]` in a registered persistent format and layout.

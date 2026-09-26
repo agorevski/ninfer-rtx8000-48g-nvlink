@@ -9,6 +9,21 @@ namespace ninfer {
 
 void cuda_check(cudaError_t err, const char* expr, const char* file, int line);
 
+// Raw UVA transfer, including enabled peer mappings. Unlike cudaMemcpyPeerAsync, this
+// operation can be captured with its stream; the caller owns ordering and peer enablement.
+[[nodiscard]] cudaError_t copy_device_async(void* destination, const void* source,
+                                            std::size_t bytes, cudaStream_t stream);
+[[nodiscard]] cudaError_t copy_device_2d_async(
+    void* destination, std::size_t destination_pitch, const void* source,
+    std::size_t source_pitch, std::size_t row_bytes, std::size_t rows, cudaStream_t stream);
+
+cudaError_t configure_dynamic_shared_memory(const void* kernel, int bytes);
+
+template <typename Kernel>
+cudaError_t configure_dynamic_shared_memory(Kernel kernel, int bytes) {
+    return configure_dynamic_shared_memory(reinterpret_cast<const void*>(kernel), bytes);
+}
+
 #define CUDA_CHECK(expr) ::ninfer::cuda_check((expr), #expr, __FILE__, __LINE__)
 
 // Non-owning execution facts passed to Ops whose launch policy depends on physical device
@@ -16,6 +31,20 @@ void cuda_check(cudaError_t err, const char* expr, const char* file, int line);
 struct DeviceExecutionView {
     cudaStream_t stream               = nullptr;
     std::int32_t multiprocessor_count = 0;
+};
+
+class DeviceGuard {
+public:
+    explicit DeviceGuard(int device);
+    ~DeviceGuard();
+    DeviceGuard(const DeviceGuard&) = delete;
+    DeviceGuard& operator=(const DeviceGuard&) = delete;
+    DeviceGuard(DeviceGuard&&) = delete;
+    DeviceGuard& operator=(DeviceGuard&&) = delete;
+
+private:
+    int previous_ = 0;
+    bool changed_ = false;
 };
 
 struct DeviceContext {
@@ -59,6 +88,7 @@ public:
     float stop_ms();
 
 private:
+    int device_         = 0;
     cudaStream_t stream_ = nullptr;
     cudaEvent_t start_   = nullptr;
     cudaEvent_t stop_    = nullptr;

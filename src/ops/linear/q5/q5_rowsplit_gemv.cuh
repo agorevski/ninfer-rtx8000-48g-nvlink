@@ -22,6 +22,7 @@
 #include "ops/common/math.h"
 #include "ops/common/memory.cuh"
 #include "ops/common/warp.cuh"
+#include "ops/linear/turing_gemv.cuh"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -127,6 +128,15 @@ q5_rowsplit_gemv_kernel(const __nv_bfloat16* __restrict__ x, const std::uint8_t*
         if (threadIdx.x == 0) { pdl::trigger_dependents(); }
     }
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
+    const int lane = threadIdx.x & 31;
+    const int row = blockIdx.x * kRowsPerBlock + (threadIdx.x >> 5);
+    const auto offset = static_cast<std::int64_t>(row) * kK;
+    const float value = turing_rowsplit_dot<5, 1>(
+        x, codes + offset / 2, high_bits + offset / 8, scales + offset / 64 * 2, kK, 0);
+    if (lane == 0) epilogue.template operator()<kSplitOutput, kSplitRow>(out, out_tail, row, value);
+    if constexpr (JoinPdl) { pdl::wait_for_dependencies(); }
+#else
     // __align__(16) so the uint4 staging below is well-defined by construction.
     __shared__ __align__(16) __nv_bfloat16 x_sh[kStageX ? kK : 1];
     __shared__ uint4 s_nib[kRowsPerBlock][kStages][32];
@@ -193,6 +203,7 @@ q5_rowsplit_gemv_kernel(const __nv_bfloat16* __restrict__ x, const std::uint8_t*
         epilogue.template operator()<kSplitOutput, kSplitRow>(out, out_tail, row, acc);
     }
     if constexpr (JoinPdl) { pdl::wait_for_dependencies(); }
+#endif
 }
 
 // One block per kRowsPerBlock rows; kRowsPerBlock warps per block.

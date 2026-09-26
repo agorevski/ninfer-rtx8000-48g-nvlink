@@ -150,6 +150,7 @@ int main(int argc, char** argv) {
         ninfer::EngineOptions engine_options;
         engine_options.artifact_path = options.artifact_path;
         engine_options.device        = options.device;
+        engine_options.tensor_parallel_device = options.tensor_parallel_device;
         engine_options.max_context   = max_context;
         engine_options.kv_capacity   = ninfer::KvCapacityPolicy::explicit_capacity(max_context);
         engine_options.prefill_chunk = options.prefill_chunk;
@@ -160,6 +161,7 @@ int main(int argc, char** argv) {
 
         ninfer::bench::BenchEnvironment env;
         env.artifact_path            = options.artifact_path;
+        env.tensor_parallel_device   = options.tensor_parallel_device;
         env.artifact_file_size_bytes = ninfer::bench::file_size_or_zero(options.artifact_path);
         env.max_context              = max_context;
         env.prefill_chunk            = options.prefill_chunk;
@@ -214,6 +216,10 @@ int main(int argc, char** argv) {
             const ninfer::MemorySummary memory    = engine.memory_summary();
             result.workspace_peak_bytes           = memory.workspace_logical_peak_bytes;
             result.workspace_allocator_peak_bytes = memory.workspace.peak_used_bytes;
+            if (memory.tensor_parallel) {
+                result.tensor_parallel_workspace_peak_bytes =
+                    memory.tensor_parallel->workspace.peak_used_bytes;
+            }
             results.push_back(std::move(result));
         }
 

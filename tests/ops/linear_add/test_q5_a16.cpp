@@ -36,6 +36,14 @@ int q5_a16_conformance() {
         ninfer::test::linear_add::run_shape("Q5_A16 LinearAdd", WeightFormat::Q5G64F16S,
                                             ShapeCase{5120, 17408, 409U, kK17408RouteStarts,
                                                       kInteriors, kK17408GraphTokens, false, 512});
+#if defined(NINFER_SM75)
+    constexpr std::array<std::int32_t, 5> kShardStarts{2, 9, 17, 33, 65};
+    constexpr std::array<std::int32_t, 11> kShardTokens{1, 2, 3, 4, 5, 6, 7, 8, 128, 512, 1024};
+    constexpr std::array<std::int32_t, 4> kShardGraphs{1, 7, 33, 513};
+    failures += ninfer::test::linear_add::run_shape(
+        "Q5_A16 LinearAdd FFN row shard", WeightFormat::Q5G64F16S,
+        ShapeCase{2560, 17408, 763U, kShardStarts, kShardTokens, kShardGraphs});
+#endif
     return failures;
 }
 

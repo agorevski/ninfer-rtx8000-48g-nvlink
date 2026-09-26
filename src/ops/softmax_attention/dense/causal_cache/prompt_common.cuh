@@ -19,7 +19,11 @@ namespace ninfer::ops {
 inline constexpr int kCausalPromptHeadDim = 256;
 
 inline constexpr int kCausalPromptBr        = 64;
+#if defined(NINFER_SM75)
+inline constexpr int kCausalPromptBc        = 32;
+#else
 inline constexpr int kCausalPromptBc        = 64;
+#endif
 inline constexpr int kCausalPromptThreads   = 128;
 inline constexpr int kCausalPromptSmemBytes = (kCausalPromptBr + 2 * kCausalPromptBc) *
                                               kCausalPromptHeadDim *

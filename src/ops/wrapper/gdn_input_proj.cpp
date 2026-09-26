@@ -1,4 +1,5 @@
 #include "core/weight.h"
+#include "ops/linear/turing.h"
 #include "ninfer/ops/gdn_input_proj.h"
 
 #include "core/layout.h"
@@ -717,6 +718,7 @@ std::size_t gdn_input_proj_workspace_capacity_bytes(QType parent_qtype, std::int
                                                     std::int32_t input_rows, LinearPolicy policy,
                                                     std::int32_t min_tokens,
                                                     std::int32_t max_tokens) {
+    detail::require_linear_weight_support(parent_qtype, "gdn_input_proj workspace");
     validate_policy(policy);
     if (min_tokens <= 0 || max_tokens < min_tokens) {
         throw std::invalid_argument("gdn_input_proj workspace: invalid token interval");
@@ -800,6 +802,7 @@ std::size_t gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
 std::size_t gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
     QType parent_qtype, std::int32_t parent_rows, std::int32_t input_rows, LinearPolicy policy,
     std::int32_t batch_size, std::int32_t min_width, std::int32_t max_width) {
+    detail::require_linear_weight_support(parent_qtype, "gdn_input_proj_conv_snapshot workspace");
     validate_policy(policy);
     require_snapshot_capacity_domain(batch_size, min_width, max_width);
     if (parent_qtype == QType::FP8_E4M3FN_ROW_BF16 &&
@@ -849,6 +852,7 @@ std::size_t gdn_input_proj_conv_record_workspace_capacity_bytes(
 std::size_t gdn_input_proj_conv_record_workspace_capacity_bytes(
     QType parent_qtype, std::int32_t parent_rows, std::int32_t input_rows, LinearPolicy policy,
     std::int32_t batch_size, std::int32_t min_width, std::int32_t max_width) {
+    detail::require_linear_weight_support(parent_qtype, "gdn_input_proj_conv_record workspace");
     validate_policy(policy);
     require_record_capacity_domain(batch_size, min_width, max_width);
     if (parent_qtype == QType::FP8_E4M3FN_ROW_BF16 &&

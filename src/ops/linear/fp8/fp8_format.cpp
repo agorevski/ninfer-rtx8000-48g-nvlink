@@ -1,5 +1,6 @@
 #include "core/weight.h"
 #include "ops/linear/fp8/fp8_format.h"
+#include "ops/linear/turing.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -36,6 +37,7 @@ std::uint64_t align_up(std::uint64_t value, std::uint64_t alignment, const char*
 } // namespace
 
 Fp8WeightGeometry validate_fp8_weight(const Weight& weight, const char* operation) {
+    require_linear_weight_support(QType::FP8_E4M3FN_ROW_BF16, operation);
     if (weight.n <= 0 || weight.k <= 0) {
         throw std::invalid_argument(std::string(operation) + ": FP8 shape must be positive");
     }

@@ -33,6 +33,17 @@ static_assert(alignof(Nvfp4QuantizedK16) == 8);
 
 __device__ __forceinline__ void
 pack_nvfp4_e2m1x16(const float2 (&values)[8], std::uint32_t& codes_lo, std::uint32_t& codes_hi) {
+#if defined(NINFER_SM75)
+    codes_lo = 0;
+    codes_hi = 0;
+#pragma unroll
+    for (int pair = 0; pair < 8; ++pair) {
+        const auto packed = static_cast<std::uint32_t>(
+            __nv_cvt_float2_to_fp4x2(values[pair], __NV_E2M1, cudaRoundNearest));
+        if (pair < 4) codes_lo |= packed << (pair * 8);
+        else codes_hi |= packed << ((pair - 4) * 8);
+    }
+#else
     asm volatile("{\n"
                  ".reg .b8 b0;\n"
                  ".reg .b8 b1;\n"
@@ -58,6 +69,7 @@ pack_nvfp4_e2m1x16(const float2 (&values)[8], std::uint32_t& codes_lo, std::uint
                    "f"(values[2].x), "f"(values[2].y), "f"(values[3].x), "f"(values[3].y),
                    "f"(values[4].x), "f"(values[4].y), "f"(values[5].x), "f"(values[5].y),
                    "f"(values[6].x), "f"(values[6].y), "f"(values[7].x), "f"(values[7].y));
+#endif
 }
 
 __device__ __forceinline__ Nvfp4QuantizedK16 quantize_nvfp4_k16(const __nv_bfloat16* source,

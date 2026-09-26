@@ -85,6 +85,33 @@ int main() {
     failures += expect_size(buffer.bytes, 0, "moved-from device buffer size");
     failures += expect_size(moved_buffer.bytes, host_source.size(), "moved device buffer size");
 
+    if (count > 1) {
+        CUDA_CHECK(cudaSetDevice(1));
+        ninfer::DeviceBuffer secondary(host_source.size());
+        ninfer::DeviceArena secondary_arena(512);
+        CUDA_CHECK(cudaSetDevice(0));
+        secondary.fill(0x5a);
+        secondary.copy_from_host(host_source.data(), host_source.size());
+        secondary.copy_to_host(host_destination.data(), host_destination.size());
+        if (host_destination != host_source)
+            return fail("cross-device buffer round trip changed payload");
+        {
+            ninfer::DeviceBuffer replacement(32);
+            replacement = std::move(secondary);
+            replacement.copy_to_host(host_destination.data(), host_destination.size());
+            if (host_destination != host_source)
+                return fail("cross-device buffer move changed payload");
+            ninfer::DeviceArena replacement_arena(128);
+            replacement_arena = std::move(secondary_arena);
+            cudaPointerAttributes attributes{};
+            CUDA_CHECK(cudaPointerGetAttributes(&attributes, replacement_arena.base()));
+            if (attributes.device != 1) return fail("arena move changed allocation device");
+        }
+        int current = -1;
+        CUDA_CHECK(cudaGetDevice(&current));
+        if (current != 0) return fail("cross-device buffer operations changed current device");
+    }
+
     ninfer::DeviceArena arena(1024);
     failures += expect_size(arena.capacity(), 1024, "arena.capacity");
     failures += expect_size(arena.used(), 0, "arena.used initial");

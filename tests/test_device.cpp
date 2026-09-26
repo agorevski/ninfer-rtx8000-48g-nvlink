@@ -91,6 +91,22 @@ int main(int argc, char** argv) {
         std::cerr << "ctx.device expected 0, got " << ctx.device << '\n';
     }
     failures += check_context(ctx, "ctx");
+    {
+        ninfer::DeviceGuard guard(ctx.device);
+        int current = -1;
+        CUDA_CHECK(cudaGetDevice(&current));
+        if (current != ctx.device) return fail("device guard selected the wrong device");
+    }
+    int after_guard = -1;
+    CUDA_CHECK(cudaGetDevice(&after_guard));
+    if (after_guard != ctx.device) return fail("device guard did not preserve the current device");
+    try {
+        ninfer::DeviceGuard invalid(count);
+        return fail("device guard accepted an invalid device");
+    } catch (const std::runtime_error&) {}
+    (void)cudaGetLastError();
+    CUDA_CHECK(cudaGetDevice(&after_guard));
+    if (after_guard != ctx.device) return fail("failed device guard changed the current device");
     int* device_value = nullptr;
     int* host_value   = nullptr;
     CUDA_CHECK(cudaMalloc(&device_value, sizeof(int)));
@@ -128,6 +144,33 @@ int main(int argc, char** argv) {
     if (elapsed_ms < 0.0f) {
         ++failures;
         std::cerr << "timer elapsed time was negative\n";
+    }
+
+    if (count > 1) {
+        {
+            ninfer::DeviceContext peer(1);
+            moved.bind_to_current_thread();
+            {
+                ninfer::CudaCompletionEvent peer_event(peer);
+                ninfer::CudaCompletionEvent replacement_event(moved);
+                replacement_event = std::move(peer_event);
+                ninfer::CudaEventTimer peer_timer(peer);
+                ninfer::CudaEventTimer replacement_timer(moved);
+                replacement_timer = std::move(peer_timer);
+                int current = -1;
+                CUDA_CHECK(cudaGetDevice(&current));
+                if (current != moved.device)
+                    return fail("event construction or move leaked the peer device binding");
+            }
+            int current = -1;
+            CUDA_CHECK(cudaGetDevice(&current));
+            if (current != moved.device)
+                return fail("event destruction leaked the peer device binding");
+        }
+        int current = -1;
+        CUDA_CHECK(cudaGetDevice(&current));
+        if (current != moved.device)
+            return fail("stream destruction leaked the peer device binding");
     }
 
     return failures == 0 ? 0 : fail("device test failed");

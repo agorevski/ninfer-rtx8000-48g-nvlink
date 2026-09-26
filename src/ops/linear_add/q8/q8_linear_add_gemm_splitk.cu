@@ -60,9 +60,10 @@ constexpr auto kK4096ProjectionLaunchers = make_projection_launchers<4096>(
 constexpr auto kK6144ProjectionLaunchers = make_projection_launchers<6144>(
     std::make_index_sequence<kLastExactCols - kFirstExactCols + 1>{});
 
-template <int Hidden, int TileCols, int KSplits, int NGroups, int MinBlocks>
+template <int Hidden, int TileCols, int RequestedKSplits, int NGroups, int MinBlocks>
 void launch_medium(const Tensor& x, Tensor& residual_out, const Weight& weight,
                    cudaStream_t stream) {
+    constexpr int KSplits = q8_physical_k_warps<RequestedKSplits, TileCols>;
     const Q8ContiguousOutput output{static_cast<__nv_bfloat16*>(residual_out.data), kRows};
     q8_ksplit_grouped_mma_kernel<Hidden, TileCols, KSplits, NGroups, MinBlocks, Q8ContiguousOutput,
                                  true><<<kRows / kRowsPerCta, KSplits * NGroups * 32, 0, stream>>>(

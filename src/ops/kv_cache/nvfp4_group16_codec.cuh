@@ -73,7 +73,19 @@ kv_cache_nvfp4_quantize_group16(const float* source) {
         values[pair].x = __fdiv_rn(values[pair].x, represented_scale);
         values[pair].y = __fdiv_rn(values[pair].y, represented_scale);
     }
+#if defined(NINFER_SM75)
+#pragma unroll
+    for (int pair = 0; pair < 8; ++pair) {
+        const auto code = __nv_cvt_float2_to_fp4x2(values[pair], __NV_E2M1, cudaRoundNearest);
+        if (pair < 4) {
+            result.codes_lo |= static_cast<std::uint32_t>(code) << (8 * pair);
+        } else {
+            result.codes_hi |= static_cast<std::uint32_t>(code) << (8 * (pair - 4));
+        }
+    }
+#else
     detail::pack_nvfp4_e2m1x16(values, result.codes_lo, result.codes_hi);
+#endif
     return result;
 }
 

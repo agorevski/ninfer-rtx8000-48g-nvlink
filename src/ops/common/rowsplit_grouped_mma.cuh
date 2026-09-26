@@ -7,6 +7,7 @@
 #include "ops/common/rowsplit_mma.cuh"
 #include "ops/linear/q4/q4_rowsplit_storage.cuh"
 #include "ops/linear/q5/q5_rowsplit_storage.cuh"
+#include "ops/linear/turing_tile.cuh"
 #include "core/tensor.h"
 
 #include <cuda_bf16.h>
@@ -47,14 +48,18 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void rowsplit_groupe
     constexpr int NT   = Cfg::NT;
     constexpr int GPB  = Cfg::GROUPS_PER_BK;
     constexpr int KSUB = BK / 16;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
+    constexpr int S    = 1;
+#else
     constexpr int S    = Cfg::STAGES;
+#endif
     constexpr int SB   = Cfg::SCALE_BYTES;
     constexpr int HB   = Codec == RowSplitGroupedMmaCodec::Q4 ? 1 : 8;
     static_assert(GPB == 1, "grouped input GEMM requires BK=group_size=64");
     static_assert(Jobs == 2 || Jobs == 4, "grouped input GEMM supports two or four jobs");
 
-    __shared__ __align__(16) __nv_bfloat16 As[BM * BK];
-    __shared__ __align__(16) __nv_bfloat16 Bs[S][BN * BK];
+    __shared__ __align__(16) A16Operand As[BM * BK];
+    __shared__ __align__(16) A16Operand Bs[S][BN * BK];
     __shared__ __align__(16) std::uint8_t Cr[S][BM * 32];
     __shared__ __align__(16) std::uint8_t Hr[S][BM * HB];
     __shared__ __align__(16) std::uint8_t Sr[S][BM * SB];
@@ -107,6 +112,18 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void rowsplit_groupe
         }
     }
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
+    if (Codec == RowSplitGroupedMmaCodec::Q5 ||
+        (Codec == RowSplitGroupedMmaCodec::Mixed && job.q5)) {
+        turing_rowsplit_tile<5, BM, BN, WM, WN>(
+            x, job.codes, job.high, job.scales, As, Bs[0], acc, k, padded_k, t, t0,
+            TuringLinearRows{m0, job.n});
+    } else {
+        turing_rowsplit_tile<4, BM, BN, WM, WN>(
+            x, job.codes, nullptr, job.scales, As, Bs[0], acc, k, padded_k, t, t0,
+            TuringLinearRows{m0, job.n});
+    }
+#else
     const int NKT      = padded_k / BK;
     const int a_mat    = lane >> 3;
     const int a_rin    = lane & 7;
@@ -124,11 +141,13 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void rowsplit_groupe
             const int kl       = kg8 * 8;
             const int col      = t0 + tl;
             const int kk       = k0 + kl;
-            __nv_bfloat16* dst = &Bs[stage][tl * BK + gemm_swz64(tl, kl)];
+            auto* dst = &Bs[stage][tl * BK + gemm_swz64(tl, kl)];
             if constexpr (FullTiles) {
-                gemm_cp_async<16, Cfg>(dst, &x[static_cast<std::int64_t>(col) * k + kk]);
+                a16_stage_activation<Cfg::CG_LOAD ? Cache::cg : Cache::ca>(
+                    dst, &x[static_cast<std::int64_t>(col) * k + kk]);
             } else if (col < t && kk + 8 <= k) {
-                gemm_cp_async<16, Cfg>(dst, &x[static_cast<std::int64_t>(col) * k + kk]);
+                a16_stage_activation<Cfg::CG_LOAD ? Cache::cg : Cache::ca>(
+                    dst, &x[static_cast<std::int64_t>(col) * k + kk]);
             } else {
                 store_vec(dst, make_int4(0, 0, 0, 0));
             }
@@ -239,7 +258,7 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void rowsplit_groupe
     auto dequant_to_As = [&](int stage, int kt) {
         const int scale_off = ((kt * BK >> 6) & 1) * 2;
         for (int row = warp; row < BM; row += Cfg::WARPS) {
-            __nv_bfloat162 w;
+            A16OperandPair w;
             if constexpr (Codec == RowSplitGroupedMmaCodec::Q5) {
                 if constexpr (Cfg::SCALE_PAIR_LOAD) {
                     w = Q5MmaDecodeAtom::decode_pair(Cr[stage], Hr[stage],
@@ -310,7 +329,7 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void rowsplit_groupe
             for (int mi = 0; mi < MT; ++mi) {
 #pragma unroll
                 for (int ni = 0; ni < NT; ++ni) {
-                    mma_bf16(acc[mi][ni][0], acc[mi][ni][1], acc[mi][ni][2], acc[mi][ni][3],
+                    a16_mma(acc[mi][ni][0], acc[mi][ni][1], acc[mi][ni][2], acc[mi][ni][3],
                              af[mi][0], af[mi][1], af[mi][2], af[mi][3], bf[ni][0], bf[ni][1]);
                 }
             }
@@ -321,6 +340,7 @@ __global__ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void rowsplit_groupe
         ninfer::ops::cp_commit();
     }
 
+#endif
 #pragma unroll
     for (int mi = 0; mi < MT; ++mi) {
         const int r0 = m0 + wm * WM + mi * 16 + gid;

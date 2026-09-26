@@ -20,7 +20,11 @@ struct Bf16N256K5120MmaSchedule {
     static constexpr int kOutputRowsPerCta  = 16;
     static constexpr int kKWarps            = KWarps;
     static constexpr int kTileTokens        = TileTokens;
+#if defined(NINFER_SM75)
+    static constexpr int kPipelineStages    = 1;
+#else
     static constexpr int kPipelineStages    = 2;
+#endif
     static constexpr Cache kWeightCache     = Cache::cg;
     static constexpr Cache kActivationCache = Cache::cg;
     static constexpr int kThreads           = kKWarps * 32;

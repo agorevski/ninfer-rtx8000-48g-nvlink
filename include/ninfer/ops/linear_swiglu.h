@@ -72,6 +72,7 @@ linear_swiglu_workspace_capacity_bytes(QType qtype, std::int32_t gate_up_rows,
  *   scoped to the call. Q8, NVFP4 A16, and row-scaled FP8 A16 require zero bytes; A4/A8 routes use
  *   caller-owned activation storage and may use private projection storage. There is no persistent
  *   state side effect.
+ *   SM75 Q4 prefill uses caller workspace for private FP16 activations and range-correction masks.
  */
 void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, LinearPolicy policy,
                    WorkspaceArena& ws, cudaStream_t stream);

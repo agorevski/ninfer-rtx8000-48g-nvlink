@@ -45,6 +45,11 @@ LoadPlan plan_load(const artifact::Reader& reader, LoadOptions options) {
     auto out     = std::make_unique<LoadPlan::Impl>();
     out->options = options;
     out->config  = parse_config(reader.directory(), options);
+    if (options.tensor_parallel_device &&
+        (!std::holds_alternative<DenseConfig>(out->config.text.ffn) ||
+         options.speculative_enabled() || options.vision)) {
+        throw artifact::ArtifactError("tensor parallelism supports dense non-speculative text only");
+    }
     artifact::Binder binder(reader);
     out->resources = loading::bind_resources(binder, out->config);
     loading::Bindings bindings(binder);
@@ -103,13 +108,16 @@ LoadPlan plan_load(const artifact::Reader& reader, LoadOptions options) {
 std::unique_ptr<Model> materialize_model(LoadPlan&& plan, DeviceContext& device,
                                          const StartupObserver* observer) {
     if (!plan.impl_) { throw artifact::ArtifactError("load plan was already consumed"); }
+    DeviceGuard guard(device.device);
     auto data    = std::move(plan.impl_);
     auto backing = artifact::materialize(*data->materialization.source,
                                          std::move(data->materialization), device, observer);
     auto bound   = loading::resolve_weights(std::move(data->pending), backing);
-    return std::unique_ptr<Model>(new Model(
+    auto model = std::unique_ptr<Model>(new Model(
         std::move(data->config), data->options, std::move(data->weights), std::move(bound),
         std::move(data->resources), std::move(data->info), std::move(backing)));
+    model->materialize_tensor_parallel(device);
+    return model;
 }
 
 std::unique_ptr<Model> load_model(const std::filesystem::path& path, LoadOptions options,

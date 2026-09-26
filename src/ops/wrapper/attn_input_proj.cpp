@@ -10,6 +10,7 @@
 #include "ops/linear/fp8/fp8_format.h"
 #include "ops/linear/nvfp4/nvfp4_config.h"
 #include "ops/linear/nvfp4/nvfp4_format.h"
+#include "ops/linear/turing.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -166,6 +167,7 @@ std::size_t attn_input_proj_workspace_capacity_bytes(QType parent_qtype, std::in
                                                      std::int32_t input_rows, LinearPolicy policy,
                                                      std::int32_t min_tokens,
                                                      std::int32_t max_tokens) {
+    detail::require_linear_weight_support(parent_qtype, "attn_input_proj workspace");
     validate_policy(policy);
     if (min_tokens <= 0 || max_tokens < min_tokens) {
         throw std::invalid_argument("attn_input_proj workspace: invalid token interval");

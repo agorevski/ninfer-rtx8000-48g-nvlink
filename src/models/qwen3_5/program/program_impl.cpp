@@ -2,6 +2,7 @@
 #include "models/qwen3_5/program/context_work.h"
 #include "models/qwen3_5/program/context.h"
 #include "models/qwen3_5/execution/linear.h"
+#include "models/qwen3_5/execution/tensor_parallel.h"
 #include "core/startup.h"
 #include "core/device.h"
 #include "ninfer/ops/target_logprobs.h"
@@ -300,6 +301,24 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
             cudaMemsetAsync(sampling_config.data, 0, sampling_config.bytes(), device.stream));
     }
     device.synchronize();
+    if (plan.features.tensor_parallel_device) {
+        std::size_t peer_bytes = 0;
+        const auto columns = static_cast<std::int32_t>(std::max(prefill_chunk, max_concurrency));
+        for (const auto& layer : parameters.text.layers) {
+            const auto& dense = std::get<execution::DenseParameters>(layer.ffn);
+            peer_bytes = std::max(peer_bytes, execution::tensor_parallel_ffn_workspace_bytes(
+                dense.tensor_parallel.value(), 1, 1, columns));
+            std::visit([&](const auto& mixer) {
+                peer_bytes = std::max(peer_bytes, execution::tensor_parallel_projection_workspace_bytes(
+                    mixer.tensor_parallel_output.value(), 1, true));
+            }, layer.mixer);
+        }
+        peer_bytes = std::max(peer_bytes, execution::tensor_parallel_projection_workspace_bytes(
+            parameters.text.tensor_parallel_head.value(), 1, false));
+        DeviceGuard guard(device.device);
+        tensor_parallel = std::make_unique<execution::TensorParallelProjections>(
+            device, *plan.features.tensor_parallel_device, peer_bytes);
+    }
     if (use_cuda_graph) {
         StartupPhaseScope graph_phase(startup_observer, StartupPhase::CudaGraphPrepare);
         prepare_graphs();
@@ -311,6 +330,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
 }
 
 ProgramImpl::~ProgramImpl() noexcept {
+    if (tensor_parallel) { tensor_parallel->drain(); }
     if (device.transfer_stream != nullptr) { (void)cudaStreamSynchronize(device.transfer_stream); }
     if (device.stream != nullptr) { (void)cudaStreamSynchronize(device.stream); }
 }
@@ -388,7 +408,8 @@ std::vector<float> ProgramImpl::causal_score(PreparedPromptData&& prompt,
             Tensor target_ids = work.alloc(DType::I32, {columns});
             Tensor logprobs   = work.alloc(DType::FP32, {columns});
             Tensor hidden     = score_hidden->slice(1, 0, columns);
-            execution::project(hidden, parameters.text.output_head, logits, work, device.stream);
+            execution::project_text_head(hidden, parameters.text, logits, work, device.stream,
+                                         tensor_parallel.get());
             CUDA_CHECK(cudaMemcpyAsync(target_ids.data, staged_targets.data(), target_ids.bytes(),
                                                     cudaMemcpyHostToDevice, device.stream));
             ops::target_logprobs(logits, target_ids,
@@ -409,7 +430,7 @@ std::vector<float> ProgramImpl::causal_score(PreparedPromptData&& prompt,
             const std::uint32_t nominal = std::min(prefill_chunk, predictor_count - cursor);
             execution::PrefillContext schedule_state{
                 {device, parameters, work, state_images->linear(), nullptr, io, prefill_hidden,
-                 prefill_chunk, proposal_head},
+                 prefill_chunk, proposal_head, tensor_parallel.get()},
                 decoder->text_kv.execution_view(text_kv_addresses->execution_row(*address)),
                 {},
                 decoder->text_kv,
@@ -511,6 +532,17 @@ MemorySummary ProgramImpl::memory_summary() const noexcept {
     const auto& weights = parameters.model.storage_stats();
     out.weights = ArenaMemorySummary{weights.device_capacity_bytes, weights.device_capacity_bytes,
                                      weights.device_capacity_bytes};
+    if (tensor_parallel) {
+        std::size_t peer_weights = 0;
+        for (const auto& layer : parameters.model.tensor_parallel_weights()) {
+            peer_weights += layer.up->storage.bytes + layer.down->storage.bytes +
+                            layer.output->storage.bytes;
+        }
+        peer_weights += parameters.model.tensor_parallel_head()->storage.bytes;
+        out.tensor_parallel = TensorParallelMemorySummary{
+            *parameters.model.options().tensor_parallel_device,
+            {peer_weights, peer_weights, peer_weights}, tensor_parallel->workspace_summary()};
+    }
     out.sequence =
         ArenaMemorySummary{persistent.capacity(), persistent.used(), persistent.peak_used()};
     std::size_t active_handoff_bytes = 0;
@@ -556,6 +588,7 @@ MemorySummary ProgramImpl::memory_summary() const noexcept {
 }
 
 void ProgramImpl::reset_memory_peaks() noexcept {
+    if (tensor_parallel) { tensor_parallel->reset_memory_peak(); }
     persistent.reset_peak();
     work.reset_peak();
     std::size_t active_handoff_bytes = 0;

@@ -489,8 +489,10 @@ int main() {
         int failures = 0;
         failures += run_full(QType::Q8_G32_FP16, "q8-full", hidden,
                              base_scores(QType::Q8_G32_FP16, host_hidden));
+#if !defined(NINFER_SM75)
         failures += run_full(QType::FP8_E4M3FN_ROW_BF16, "fp8-full", hidden,
                              base_scores(QType::FP8_E4M3FN_ROW_BF16, host_hidden));
+#endif
         failures += run_q4(hidden, base_scores(QType::Q4_G64_FP16, host_hidden));
         std::cout << (failures == 0 ? "OK" : "FAIL") << " linear_topk\n";
         return failures == 0 ? 0 : 1;

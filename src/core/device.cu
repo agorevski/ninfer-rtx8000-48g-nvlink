@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 
 namespace ninfer {
@@ -42,16 +43,26 @@ void log_cuda_error(const char* op, cudaError_t err) noexcept {
     }
 }
 
-void destroy_stream(cudaStream_t& stream) noexcept {
+void destroy_stream(cudaStream_t& stream, int device) noexcept {
     if (stream != nullptr) {
-        log_cuda_error("cudaStreamDestroy", cudaStreamDestroy(stream));
+        try {
+            DeviceGuard guard(device);
+            log_cuda_error("cudaStreamDestroy", cudaStreamDestroy(stream));
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "CUDA stream cleanup device selection failed: %s\n", error.what());
+        }
         stream = nullptr;
     }
 }
 
-void destroy_event(cudaEvent_t& event) noexcept {
+void destroy_event(cudaEvent_t& event, int device) noexcept {
     if (event != nullptr) {
-        log_cuda_error("cudaEventDestroy", cudaEventDestroy(event));
+        try {
+            DeviceGuard guard(device);
+            log_cuda_error("cudaEventDestroy", cudaEventDestroy(event));
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "CUDA event cleanup device selection failed: %s\n", error.what());
+        }
         event = nullptr;
     }
 }
@@ -63,6 +74,48 @@ void cuda_check(cudaError_t err, const char* expr, const char* file, int line) {
     std::fprintf(stderr, "%s:%d: CUDA_CHECK(%s) failed: %s: %s\n", file, line, expr,
                  cudaGetErrorName(err), cudaGetErrorString(err));
     std::abort();
+}
+
+cudaError_t copy_device_async(void* destination, const void* source, std::size_t bytes,
+                               cudaStream_t stream) {
+    return cudaMemcpyAsync(destination, source, bytes, cudaMemcpyDeviceToDevice, stream);
+}
+
+cudaError_t copy_device_2d_async(
+    void* destination, std::size_t destination_pitch, const void* source,
+    std::size_t source_pitch, std::size_t row_bytes, std::size_t rows, cudaStream_t stream) {
+    return cudaMemcpy2DAsync(destination, destination_pitch, source, source_pitch, row_bytes,
+                             rows, cudaMemcpyDeviceToDevice, stream);
+}
+
+cudaError_t configure_dynamic_shared_memory(const void* kernel, int bytes) {
+    // Function attributes belong to a device context, not to the host kernel symbol.
+    thread_local std::unordered_map<int, std::unordered_map<const void*, int>> configured;
+    int device = 0;
+    cudaError_t status = cudaGetDevice(&device);
+    if (status != cudaSuccess) return status;
+    auto& kernels = configured[device];
+    const auto found = kernels.find(kernel);
+    if (found != kernels.end() && found->second >= bytes) return cudaSuccess;
+    status = cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes);
+    if (status == cudaSuccess) kernels[kernel] = bytes;
+    return status;
+}
+
+DeviceGuard::DeviceGuard(int device) {
+    cudaError_t status = cudaGetDevice(&previous_);
+    if (status != cudaSuccess)
+        throw std::runtime_error(cuda_error_message("cudaGetDevice failed", status));
+    if (previous_ != device) {
+        status = cudaSetDevice(device);
+        if (status != cudaSuccess)
+            throw std::runtime_error(cuda_error_message("cudaSetDevice failed", status));
+        changed_ = true;
+    }
+}
+
+DeviceGuard::~DeviceGuard() {
+    if (changed_) log_cuda_error("cudaSetDevice", cudaSetDevice(previous_));
 }
 
 DeviceContext::DeviceContext(int device_id) : device(device_id) {
@@ -97,7 +150,7 @@ DeviceContext::DeviceContext(int device_id) : device(device_id) {
 
     err = cudaStreamCreateWithFlags(&load, cudaStreamNonBlocking);
     if (err != cudaSuccess) {
-        destroy_stream(compute);
+        destroy_stream(compute, device);
         throw std::runtime_error(
             cuda_error_message("cudaStreamCreateWithFlags(transfer_stream) failed", err));
     }
@@ -107,9 +160,8 @@ DeviceContext::DeviceContext(int device_id) : device(device_id) {
 }
 
 DeviceContext::~DeviceContext() {
-    if (stream != nullptr || transfer_stream != nullptr) { bind_to_current_thread_noexcept(); }
-    destroy_stream(transfer_stream);
-    destroy_stream(stream);
+    destroy_stream(transfer_stream, device);
+    destroy_stream(stream, device);
 }
 
 DeviceContext::DeviceContext(DeviceContext&& other) noexcept
@@ -122,9 +174,8 @@ DeviceContext::DeviceContext(DeviceContext&& other) noexcept
 DeviceContext& DeviceContext::operator=(DeviceContext&& other) noexcept {
     if (this == &other) { return *this; }
 
-    if (stream != nullptr || transfer_stream != nullptr) { bind_to_current_thread_noexcept(); }
-    destroy_stream(transfer_stream);
-    destroy_stream(stream);
+    destroy_stream(transfer_stream, device);
+    destroy_stream(stream, device);
 
     device          = other.device;
     props           = other.props;
@@ -174,9 +225,10 @@ void DeviceContext::synchronize() const { CUDA_CHECK(cudaStreamSynchronize(strea
 
 CudaEventTimer::CudaEventTimer(const DeviceContext& ctx) : CudaEventTimer(ctx, ctx.stream) {}
 
-CudaEventTimer::CudaEventTimer(const DeviceContext& ctx, cudaStream_t stream) : stream_(stream) {
+CudaEventTimer::CudaEventTimer(const DeviceContext& ctx, cudaStream_t stream)
+    : device_(ctx.device), stream_(stream) {
     if (stream == nullptr) { throw std::invalid_argument("CUDA timer stream is null"); }
-    ctx.bind_to_current_thread();
+    DeviceGuard guard(device_);
 
     cudaEvent_t start = nullptr;
     cudaEvent_t stop  = nullptr;
@@ -187,7 +239,7 @@ CudaEventTimer::CudaEventTimer(const DeviceContext& ctx, cudaStream_t stream) : 
 
     err = cudaEventCreate(&stop);
     if (err != cudaSuccess) {
-        destroy_event(start);
+        destroy_event(start, device_);
         throw std::runtime_error(cuda_error_message("cudaEventCreate(stop) failed", err));
     }
 
@@ -196,12 +248,12 @@ CudaEventTimer::CudaEventTimer(const DeviceContext& ctx, cudaStream_t stream) : 
 }
 
 CudaEventTimer::~CudaEventTimer() {
-    destroy_event(stop_);
-    destroy_event(start_);
+    destroy_event(stop_, device_);
+    destroy_event(start_, device_);
 }
 
 CudaEventTimer::CudaEventTimer(CudaEventTimer&& other) noexcept
-    : stream_(other.stream_), start_(other.start_), stop_(other.stop_) {
+    : device_(other.device_), stream_(other.stream_), start_(other.start_), stop_(other.stop_) {
     other.stream_ = nullptr;
     other.start_  = nullptr;
     other.stop_   = nullptr;
@@ -210,9 +262,10 @@ CudaEventTimer::CudaEventTimer(CudaEventTimer&& other) noexcept
 CudaEventTimer& CudaEventTimer::operator=(CudaEventTimer&& other) noexcept {
     if (this == &other) { return *this; }
 
-    destroy_event(stop_);
-    destroy_event(start_);
+    destroy_event(stop_, device_);
+    destroy_event(start_, device_);
 
+    device_ = other.device_;
     stream_ = other.stream_;
     start_  = other.start_;
     stop_   = other.stop_;
@@ -240,21 +293,21 @@ float CudaEventTimer::stop_ms() {
 }
 
 CudaCompletionEvent::CudaCompletionEvent(const DeviceContext& ctx) : device_(ctx.device) {
-    ctx.bind_to_current_thread();
+    DeviceGuard guard(device_);
     const cudaError_t err = cudaEventCreateWithFlags(&event_, cudaEventDisableTiming);
     if (err != cudaSuccess) {
         throw std::runtime_error(cuda_error_message("cudaEventCreateWithFlags failed", err));
     }
 }
 
-CudaCompletionEvent::~CudaCompletionEvent() { destroy_event(event_); }
+CudaCompletionEvent::~CudaCompletionEvent() { destroy_event(event_, device_); }
 
 CudaCompletionEvent::CudaCompletionEvent(CudaCompletionEvent&& other) noexcept
     : device_(other.device_), event_(std::exchange(other.event_, nullptr)) {}
 
 CudaCompletionEvent& CudaCompletionEvent::operator=(CudaCompletionEvent&& other) noexcept {
     if (this == &other) { return *this; }
-    destroy_event(event_);
+    destroy_event(event_, device_);
     device_ = other.device_;
     event_  = std::exchange(other.event_, nullptr);
     return *this;

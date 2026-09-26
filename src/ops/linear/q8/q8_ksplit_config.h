@@ -21,6 +21,18 @@ enum class Q8KSplitActivationStage : std::uint8_t {
     RuntimeActive,
 };
 
+template <int RequestedWarps, int TileTokens>
+inline constexpr int q8_physical_k_warps =
+#if defined(NINFER_SM75)
+    // Per K warp: 16x64 code bytes, 16x4 scale bytes, and TileTokens x64 BF16 values.
+    RequestedWarps * (1088 + TileTokens * 128) <= 48 * 1024 ? RequestedWarps :
+    (RequestedWarps / 2) * (1088 + TileTokens * 128) <= 48 * 1024 ? RequestedWarps / 2 :
+    (RequestedWarps / 4) * (1088 + TileTokens * 128) <= 48 * 1024 ? RequestedWarps / 4 :
+    RequestedWarps / 8;
+#else
+    RequestedWarps;
+#endif
+
 template <int KWarps, int TileTokens, int MinBlocksPerSm, Q8KSplitScaleAccess ScaleAccess,
           Cache ActivationCache = Cache::ca, Cache WeightCache = Cache::cg,
           Q8KSplitActivationStage ActivationStage = Q8KSplitActivationStage::ActiveOnly>
@@ -31,18 +43,18 @@ struct Q8KSplitSchedule {
                   TileTokens == 72 || TileTokens == 80 || TileTokens == 88);
     static_assert(MinBlocksPerSm > 0);
 
-    static constexpr int kKWarps            = KWarps;
+    static constexpr int kKWarps            = q8_physical_k_warps<KWarps, TileTokens>;
     static constexpr int kTileTokens        = TileTokens;
     static constexpr int kMinBlocksPerSm    = MinBlocksPerSm;
     static constexpr auto kScaleAccess      = ScaleAccess;
     static constexpr auto kActivationCache  = ActivationCache;
     static constexpr auto kWeightCache      = WeightCache;
     static constexpr auto kActivationStage  = ActivationStage;
-    static constexpr int kThreads           = KWarps * 32;
+    static constexpr int kThreads           = kKWarps * 32;
     static constexpr int kTileKPerWarp      = 64;
-    static constexpr int kGroupK            = KWarps * kTileKPerWarp;
+    static constexpr int kGroupK            = kKWarps * kTileKPerWarp;
     static constexpr int kRowsPerCta        = 16;
-    static constexpr int kRowsPerLoaderWarp = kRowsPerCta / KWarps;
+    static constexpr int kRowsPerLoaderWarp = kRowsPerCta / kKWarps;
     static constexpr int kScaleBytesPerRow  = kGroupK / 16;
 };
 

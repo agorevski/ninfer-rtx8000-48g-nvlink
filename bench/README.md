@@ -58,7 +58,8 @@ ninfer_bench --weights <artifact.ninfer>
           [--max-ctx <tokens>] [--prefill-chunk <tokens>]
           [--kv-dtype <bf16|int8|fp8|nvfp4|k8v4>]
           [--spec <mtp|dflash|dflash2> --draft-tokens <n>] [--lm-head-draft]
-          [--device <id>] [--no-cuda-graph] [--profile-measured]
+          [--device <id>] [--tensor-parallel-device <id>]
+          [--no-cuda-graph] [--profile-measured]
           [-o, --output <table|json|csv>] [--output-file <path>]
 ```
 
@@ -90,8 +91,31 @@ For a DFlash2 companion artifact:
 ```
 
 The benchmark disables context retention because every repetition is an independent root request.
-Schema v15 records `speculative_backend`, `draft_tokens`, and the proposal head independently;
-JSON and CSV identify DFlash2 explicitly. MTP alone reserves its extra lookahead KV margin.
+Schema v16 records `speculative_backend`, `draft_tokens`, and the proposal head independently;
+JSON and CSV identify DFlash2 explicitly. It also records optional tensor-parallel placement and
+secondary-device weight/workspace residency separately from primary-device memory. Device ordinals
+are relative to `CUDA_VISIBLE_DEVICES`; with `CUDA_VISIBLE_DEVICES=2,3`, use `--device 0
+--tensor-parallel-device 1`. Omit the tensor-parallel option for a single-GPU run.
+MTP alone reserves its extra lookahead KV margin.
+
+For RTX 8000 native, long-context, and concurrent workloads, use the commands and explicit artifact
+selection in the [Qwen3.8-27B RTX 8000 record](../docs/performance/rtx8000-qwen3.8-27b.md).
+That record distinguishes comparison targets from measurements; successful configuration or
+model loading alone does not establish a speedup.
+
+## Paired causal-score comparison
+
+`ninfer_score` exports causal token scores through the same public Engine used by generation and
+the perplexity application. The independent `tools/bench/llama_score.cpp` adapter evaluates a GGUF
+reference on the exported token IDs, window boundaries, and target positions. Build it against an
+explicit local llama.cpp checkout with `tools/bench/build_llama_score.py`; no alternate inference
+runtime is linked into NInfer.
+
+`tools/bench/compare_causal_scores.py` checks matching inputs and scoring protocols before reporting
+aggregate and per-domain NLL differences and paired-window diagnostics. Keep KV precision equal
+for a weight-only comparison; evaluate deployment KV quantization separately. The RTX 8000 record
+contains the exact commands and quality threshold. The usual `llama-perplexity` half-window
+protocol is not interchangeable with NInfer's every-target scoring protocol.
 
 ## Context-cost calibration
 

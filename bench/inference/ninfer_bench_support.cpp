@@ -298,12 +298,14 @@ std::string usage_text(std::string_view program) {
         << "  --max-ctx <tokens>          override auto-sized context capacity\n"
         << "  --prefill-chunk <tokens>    multiple of " << kPrefillChunkAlignment
         << " (default: " << kDefaultPrefillChunk << ")\n"
-        << "  --kv-dtype <bf16|int8|fp8|nvfp4|k8v4>  KV cache storage (default: bf16)\n"
+        << "  --kv-dtype <bf16|int8|fp8|nvfp4|k8v4>  KV cache storage (default: "
+        << (kDefaultKvCacheStorage == KvCacheStorage::Int8Group64 ? "int8" : "bf16") << ")\n"
         << "  --spec <mtp|dflash|dflash2> speculative backend (default: none)\n"
         << "  --draft-tokens <n>         MTP 1..5; DFlash/DFlash2 1..15\n"
         << "  --lm-head-draft             use the optimized proposal head; requires a speculative "
            "backend\n"
         << "  --device <id>               CUDA device ordinal (default: 0)\n"
+        << "  --tensor-parallel-device <id> second CUDA ordinal (default: disabled)\n"
         << "  --no-cuda-graph             use eager decode\n"
         << "  --profile-measured          bracket one measured repetition with CUDA profiler API\n"
         << "  -o, --output <table|json|csv>  output format (default: table)\n"
@@ -361,6 +363,9 @@ BenchOptions parse_args(int argc, char** argv) {
             options.speculative.proposal_head = ProposalHead::Optimized;
         } else if (arg == "--device") {
             options.device = parse_nonnegative(value("--device"), "device");
+        } else if (arg == "--tensor-parallel-device") {
+            options.tensor_parallel_device =
+                parse_nonnegative(value("--tensor-parallel-device"), "tensor-parallel-device");
         } else if (arg == "--no-cuda-graph") {
             options.use_cuda_graph = false;
         } else if (arg == "--profile-measured") {
@@ -383,6 +388,9 @@ BenchOptions parse_args(int argc, char** argv) {
         }
     }
     if (!saw_artifact) { throw std::invalid_argument("--weights is required"); }
+    if (options.tensor_parallel_device == options.device) {
+        throw std::invalid_argument("--tensor-parallel-device must differ from --device");
+    }
     if (options.prefill_chunk % kPrefillChunkAlignment != 0) {
         throw std::invalid_argument("--prefill-chunk must be a multiple of 128");
     }
@@ -595,6 +603,8 @@ std::string format_table(const BenchEnvironment& env, const std::vector<TestResu
         << format_bytes(env.memory.kv_payload_bytes) << '\n'
         << "  corpus:     " << env.corpus_path << " (" << env.corpus_tokens << " tokens)\n"
         << "  config:     max_context=" << env.max_context << " prefill_chunk=" << env.prefill_chunk
+        << " device=" << env.device_id << " tensor_parallel_device="
+        << (env.tensor_parallel_device ? std::to_string(*env.tensor_parallel_device) : "none")
         << " kv_cache=" << kv_cache_name(env.kv_cache)
         << " spec=" << product::speculative_backend_name(env.speculative.backend)
         << " draft_tokens=" << env.speculative.draft_tokens
@@ -605,6 +615,12 @@ std::string format_table(const BenchEnvironment& env, const std::vector<TestResu
                 ? std::to_string(env.decode_graph_prime_output_tokens) + " outputs"
                 : "n/a")
         << " repetitions=" << env.repetitions << " warmup=" << env.warmup << "\n\n";
+    if (env.memory.tensor_parallel) {
+        const auto& peer = *env.memory.tensor_parallel;
+        out << "  peer GPU " << peer.device << ": weights "
+            << format_bytes(peer.weights.capacity_bytes) << ", workspace "
+            << format_bytes(peer.workspace.capacity_bytes) << "\n\n";
+    }
 
     constexpr std::size_t cols                   = 9;
     const std::array<std::string, cols> headings = {
@@ -664,7 +680,9 @@ std::string format_json(const BenchEnvironment& env, const std::string& command,
         << "  \"environment\": {\"gpu_name\": \"" << json_escape(env.gpu_name)
         << "\", \"cuda_runtime_version\": \"" << json_escape(env.cuda_runtime_version)
         << "\", \"cuda_driver_version\": \"" << json_escape(env.cuda_driver_version)
-        << "\", \"device_id\": " << env.device_id << "},\n"
+        << "\", \"device_id\": " << env.device_id << ", \"tensor_parallel_device\": "
+        << (env.tensor_parallel_device ? std::to_string(*env.tensor_parallel_device) : "null")
+        << "},\n"
         << "  \"artifact\": {\"path\": \"" << json_escape(env.artifact_path)
         << "\", \"file_size_bytes\": " << env.artifact_file_size_bytes << "},\n"
         << "  \"load\": {\n"
@@ -694,6 +712,16 @@ std::string format_json(const BenchEnvironment& env, const std::string& command,
     append_arena_json(out, "weights", env.memory.weights, "    ", true);
     append_arena_json(out, "sequence", env.memory.sequence, "    ", true);
     append_arena_json(out, "workspace", env.memory.workspace, "    ", true);
+    out << "    \"tensor_parallel\": ";
+    if (env.memory.tensor_parallel) {
+        const auto& peer = *env.memory.tensor_parallel;
+        out << "{\n      \"device\": " << peer.device << ",\n";
+        append_arena_json(out, "weights", peer.weights, "      ", true);
+        append_arena_json(out, "workspace", peer.workspace, "      ", false);
+        out << "    },\n";
+    } else {
+        out << "null,\n";
+    }
     append_vision_workspace_json(out, env.memory.vision_workspace, "    ", true);
     out << "    \"minimum_runtime_reservation_bytes\": "
         << env.memory.minimum_runtime_reservation_bytes << ",\n"
@@ -755,7 +783,11 @@ std::string format_json(const BenchEnvironment& env, const std::string& command,
         append_stat(out, "total_seconds", total_time_series(result), "      ");
         out << ",\n      \"workspace_peak_bytes\": " << result.workspace_peak_bytes
             << ",\n      \"workspace_allocator_peak_bytes\": "
-            << result.workspace_allocator_peak_bytes << ",\n";
+            << result.workspace_allocator_peak_bytes
+            << ",\n      \"tensor_parallel_workspace_peak_bytes\": "
+            << (result.tensor_parallel_workspace_peak_bytes
+                    ? std::to_string(*result.tensor_parallel_workspace_peak_bytes) : "null")
+            << ",\n";
         append_speculative_json(out, aggregate_speculative(result), "      ");
         out << ",\n      \"reps\": [\n";
         for (std::size_t r = 0; r < result.reps.size(); ++r) {
@@ -805,7 +837,9 @@ std::string format_csv(const BenchEnvironment& env, const std::vector<TestResult
            "spec_rounds,spec_fallback_steps,spec_acceptance_rate,"
            "repetitions,prefill_tok_s_mean,prefill_tok_s_stddev,decode_output_tok_s_mean,"
            "decode_output_tok_s_stddev,decode_engine_tok_s_mean,decode_engine_tok_s_stddev,"
-           "prepare_seconds_mean,prefill_seconds_mean,decode_seconds_mean,total_seconds_mean\n";
+           "prepare_seconds_mean,prefill_seconds_mean,decode_seconds_mean,total_seconds_mean,"
+           "device_id,tensor_parallel_device,tensor_parallel_weights_capacity_bytes,"
+           "tensor_parallel_workspace_capacity_bytes,tensor_parallel_workspace_peak_bytes\n";
     const auto mean = [](const std::vector<double>& values) {
         return values.empty() ? std::string() : number(compute_stats(values).mean);
     };
@@ -846,7 +880,19 @@ std::string format_csv(const BenchEnvironment& env, const std::vector<TestResult
             << mean(decode_engine_tok_s_series(result)) << ','
             << stddev(decode_engine_tok_s_series(result)) << ','
             << mean(prepare_time_series(result)) << ',' << mean(prefill_time_series(result)) << ','
-            << mean(decode_time_series(result)) << ',' << mean(total_time_series(result)) << '\n';
+            << mean(decode_time_series(result)) << ',' << mean(total_time_series(result)) << ','
+            << env.device_id << ','
+            << (env.tensor_parallel_device ? std::to_string(*env.tensor_parallel_device) : "")
+            << ','
+            << (env.memory.tensor_parallel
+                    ? std::to_string(env.memory.tensor_parallel->weights.capacity_bytes) : "")
+            << ','
+            << (env.memory.tensor_parallel
+                    ? std::to_string(env.memory.tensor_parallel->workspace.capacity_bytes) : "")
+            << ','
+            << (result.tensor_parallel_workspace_peak_bytes
+                    ? std::to_string(*result.tensor_parallel_workspace_peak_bytes) : "")
+            << '\n';
     }
     return out.str();
 }

@@ -1,15 +1,18 @@
 #include "ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_w4a4_tma_launch.h"
 
 #include "core/device.h"
+#if !defined(NINFER_SM75)
 #include "ops/linear/nvfp4/nvfp4_config.h"
 #include "ops/linear/nvfp4/nvfp4_w4a4_tma.cuh"
 #include "ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_w4a4_tma.cuh"
+#endif
 
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
 
 namespace ninfer::ops::detail {
+#if !defined(NINFER_SM75)
 namespace {
 
 using M256N128S3 = Nvfp4W4a4TmaSchedule<256, 3, 1>;
@@ -55,12 +58,16 @@ Nvfp4W4a4TmaDescriptors make_descriptors(const std::uint8_t* activation_codes,
 }
 
 } // namespace
+#endif
 
 void launch_nvfp4_linear_swiglu_w4a4_tma(const std::uint8_t* activation_codes,
                                          const std::uint8_t* activation_scales,
                                          const std::uint8_t* weight_codes,
                                          const std::uint8_t* weight_scales, __nv_bfloat16* output,
                                          std::int32_t tokens, float alpha, cudaStream_t stream) {
+#if defined(NINFER_SM75)
+    throw std::invalid_argument("NVFP4 Tensor Memory Accelerator projections require SM120a");
+#else
     if (tokens < M256N128S3::kBlockM || (tokens % M256N128S3::kBlockM) != 0) {
         throw std::invalid_argument(
             "nvfp4 LinearSwiGLU TMA requires a positive M256 full-tile token count");
@@ -68,13 +75,9 @@ void launch_nvfp4_linear_swiglu_w4a4_tma(const std::uint8_t* activation_codes,
 
     using Geometry                     = Nvfp4N34816K5120;
     constexpr std::size_t kSharedBytes = sizeof(Nvfp4LinearSwiGluTmaSharedStorage<M256N128S3>);
-    static const bool kConfigured      = [] {
-        CUDA_CHECK(cudaFuncSetAttribute(nvfp4_linear_swiglu_w4a4_tma_kernel<Geometry, M256N128S3>,
-                                             cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                             static_cast<int>(kSharedBytes)));
-        return true;
-    }();
-    (void)kConfigured;
+    CUDA_CHECK(configure_dynamic_shared_memory(
+        nvfp4_linear_swiglu_w4a4_tma_kernel<Geometry, M256N128S3>,
+        static_cast<int>(kSharedBytes)));
 
     const Nvfp4W4a4TmaDescriptors descriptors = make_descriptors<Geometry, M256N128S3>(
         activation_codes, activation_scales, weight_codes, weight_scales, tokens);
@@ -83,6 +86,7 @@ void launch_nvfp4_linear_swiglu_w4a4_tma(const std::uint8_t* activation_codes,
     nvfp4_linear_swiglu_w4a4_tma_kernel<Geometry, M256N128S3>
         <<<grid, M256N128S3::kThreads, kSharedBytes, stream>>>(descriptors, alpha, output);
     CUDA_CHECK(cudaGetLastError());
+#endif
 }
 
 } // namespace ninfer::ops::detail

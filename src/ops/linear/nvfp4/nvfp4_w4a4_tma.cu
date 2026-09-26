@@ -1,16 +1,20 @@
 #include "ops/linear/nvfp4/nvfp4_w4a4_tma_launch.h"
 
 #include "core/device.h"
+#if !defined(NINFER_SM75)
 #include "ops/gdn_input_proj/nvfp4/nvfp4_gdn_input_output.cuh"
 #include "ops/linear/nvfp4/nvfp4_config.h"
 #include "ops/linear/nvfp4/nvfp4_w4a4_mma.cuh"
 #include "ops/linear/nvfp4/nvfp4_w4a4_tma.cuh"
 #include "ops/linear_add/nvfp4/nvfp4_linear_add_epilogue.cuh"
+#endif
 
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 
 namespace ninfer::ops::detail {
+#if !defined(NINFER_SM75)
 namespace {
 
 using TmaM256N128 = Nvfp4W4a4TmaSchedule<256, 3, 1>;
@@ -64,13 +68,9 @@ void launch_tma(const std::uint8_t* activation_codes, const std::uint8_t* activa
             activation_codes, activation_scales, weight_codes, weight_scales, tokens,
             Schedule::kWeightCodePromotion);
     constexpr std::size_t kSharedBytes = sizeof(Nvfp4W4a4TmaSharedStorage<Schedule>);
-    static const bool kConfigured      = [] {
-        CUDA_CHECK(cudaFuncSetAttribute(nvfp4_w4a4_tma_kernel<Geometry, Schedule, Epilogue, Output>,
-                                             cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                             static_cast<int>(kSharedBytes)));
-        return true;
-    }();
-    (void)kConfigured;
+    CUDA_CHECK(configure_dynamic_shared_memory(
+        nvfp4_w4a4_tma_kernel<Geometry, Schedule, Epilogue, Output>,
+        static_cast<int>(kSharedBytes)));
 
     // The last M tile may be partial; the kernel bounds itself by the real token count.
     const dim3 grid(Geometry::kOutputRows / Schedule::kBlockN,
@@ -90,12 +90,16 @@ void launch_linear(const std::uint8_t* activation_codes, const std::uint8_t* act
 }
 
 } // namespace
+#endif
 
 void launch_nvfp4_w4a4_tma_linear(Nvfp4GeometryId problem, const std::uint8_t* activation_codes,
                                   const std::uint8_t* activation_scales,
                                   const std::uint8_t* weight_codes,
                                   const std::uint8_t* weight_scales, __nv_bfloat16* output,
                                   std::int32_t tokens, float alpha, cudaStream_t stream) {
+#if defined(NINFER_SM75)
+    throw std::invalid_argument("NVFP4 Tensor Memory Accelerator projections require SM120a");
+#else
     switch (problem) {
     case Nvfp4GeometryId::N14336K5120:
         launch_linear<Nvfp4N14336K5120>(activation_codes, activation_scales, weight_codes,
@@ -119,6 +123,7 @@ void launch_nvfp4_w4a4_tma_linear(Nvfp4GeometryId problem, const std::uint8_t* a
                                         weight_scales, output, tokens, alpha, stream);
         return;
     }
+#endif
 }
 
 void launch_nvfp4_w4a4_tma_attention(const std::uint8_t* activation_codes,
@@ -127,9 +132,13 @@ void launch_nvfp4_w4a4_tma_attention(const std::uint8_t* activation_codes,
                                      const std::uint8_t* weight_scales, __nv_bfloat16* query,
                                      __nv_bfloat16* gate, __nv_bfloat16* key, __nv_bfloat16* value,
                                      std::int32_t tokens, float alpha, cudaStream_t stream) {
+#if defined(NINFER_SM75)
+    throw std::invalid_argument("NVFP4 Tensor Memory Accelerator projections require SM120a");
+#else
     launch_tma<Nvfp4N14336K5120, TmaM256N128>(activation_codes, activation_scales, weight_codes,
                                               weight_scales, tokens, alpha, Nvfp4IdentityEpilogue{},
                                               AttentionOutput{query, key, gate, value}, stream);
+#endif
 }
 
 void launch_nvfp4_w4a4_tma_gdn(const std::uint8_t* activation_codes,
@@ -137,11 +146,16 @@ void launch_nvfp4_w4a4_tma_gdn(const std::uint8_t* activation_codes,
                                const std::uint8_t* weight_codes, const std::uint8_t* weight_scales,
                                __nv_bfloat16* qkv, __nv_bfloat16* z, std::int32_t tokens,
                                float alpha, cudaStream_t stream) {
+#if defined(NINFER_SM75)
+    throw std::invalid_argument("NVFP4 Tensor Memory Accelerator projections require SM120a");
+#else
     launch_tma<Nvfp4N16384K5120, TmaM256N128>(activation_codes, activation_scales, weight_codes,
                                               weight_scales, tokens, alpha, Nvfp4IdentityEpilogue{},
                                               Nvfp4GdnInputOutput{qkv, z}, stream);
+#endif
 }
 
+#if !defined(NINFER_SM75)
 template <class Geometry>
 void launch_linear_add(const std::uint8_t* activation_codes, const std::uint8_t* activation_scales,
                        const std::uint8_t* weight_codes, const std::uint8_t* weight_scales,
@@ -152,12 +166,16 @@ void launch_linear_add(const std::uint8_t* activation_codes, const std::uint8_t*
         Nvfp4AddResidualEpilogue{residual, Geometry::kOutputRows},
         Nvfp4ContiguousOutput{residual, Geometry::kOutputRows}, stream);
 }
+#endif
 
 void launch_nvfp4_w4a4_tma_linear_add(Nvfp4GeometryId problem, const std::uint8_t* activation_codes,
                                       const std::uint8_t* activation_scales,
                                       const std::uint8_t* weight_codes,
                                       const std::uint8_t* weight_scales, __nv_bfloat16* residual,
                                       std::int32_t tokens, float alpha, cudaStream_t stream) {
+#if defined(NINFER_SM75)
+    throw std::invalid_argument("NVFP4 Tensor Memory Accelerator projections require SM120a");
+#else
     switch (problem) {
     case Nvfp4GeometryId::N5120K6144:
         launch_linear_add<Nvfp4N5120K6144>(activation_codes, activation_scales, weight_codes,
@@ -172,6 +190,7 @@ void launch_nvfp4_w4a4_tma_linear_add(Nvfp4GeometryId problem, const std::uint8_
     case Nvfp4GeometryId::N34816K5120:
         return;
     }
+#endif
 }
 
 } // namespace ninfer::ops::detail

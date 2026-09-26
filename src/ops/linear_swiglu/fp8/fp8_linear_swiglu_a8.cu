@@ -2,6 +2,7 @@
 #include "ops/linear_swiglu/fp8/fp8_linear_swiglu_plan.h"
 
 #include "core/device.h"
+#include <stdexcept>
 #include "ops/linear/fp8/fp8_a8_mma.cuh"
 #include "ops/linear/fp8/fp8_a8_plan.h"
 #include "ops/linear/fp8/fp8_a8_schedule.cuh"
@@ -33,11 +34,10 @@ void launch_mma(const Weight& weight, Tensor& out, Fp8A8Workspace workspace, std
     const Fp8SwiGluOutput output{static_cast<__nv_bfloat16*>(out.data), kIntermediate};
 
     if constexpr (Schedule::kSharedBytes > 48 * 1024) {
-        static const cudaError_t attribute = cudaFuncSetAttribute(
+        CUDA_CHECK(configure_dynamic_shared_memory(
             fp8_mma_kernel<Geometry, Schedule, FullTokens, Fp8IdentityEpilogue, Fp8SwiGluOutput,
                            Rows, true>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, Schedule::kSharedBytes);
-        CUDA_CHECK(attribute);
+            Schedule::kSharedBytes));
     }
     fp8_mma_kernel<Geometry, Schedule, FullTokens, Fp8IdentityEpilogue, Fp8SwiGluOutput, Rows, true>
         <<<blocks, Schedule::kThreads, Schedule::kSharedBytes, stream>>>(
@@ -51,6 +51,9 @@ void launch_mma(const Weight& weight, Tensor& out, Fp8A8Workspace workspace, std
 
 void fp8_linear_swiglu_a8_launch(const Tensor& x, const Weight& weight, Tensor& out,
                                  WorkspaceArena& workspace, cudaStream_t stream) {
+#if defined(NINFER_SM75)
+    throw std::invalid_argument("FP8 tensor-core SwiGLU projections are unavailable on SM75");
+#else
     auto scope = workspace.scope();
     const Fp8A8Workspace scratch =
         allocate_fp8_a8_workspace(workspace, x.ne[1], Geometry::kInputRows);
@@ -60,6 +63,7 @@ void fp8_linear_swiglu_a8_launch(const Tensor& x, const Weight& weight, Tensor& 
     } else {
         launch_mma<false>(weight, out, scratch, x.ne[1], stream);
     }
+#endif
 }
 
 } // namespace ninfer::ops::detail

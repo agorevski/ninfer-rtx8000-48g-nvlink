@@ -21,13 +21,13 @@ void causal_attention_prompt_attention_launch_for(const Tensor& q, const Tensor&
     const Tensor& cache_k = cache.k_pages;
     const Tensor& cache_v = cache.v_pages;
     // Both dtype-specialized kernels exceed the default 48 KiB dynamic-smem ceiling.
-    static const cudaError_t attr_bf16 =
-        cudaFuncSetAttribute(causal_attention_prompt_bf16_kernel<Geometry, Metadata>,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, kCausalPromptSmemBytes);
+    const cudaError_t attr_bf16 =
+        configure_dynamic_shared_memory(causal_attention_prompt_bf16_kernel<Geometry, Metadata>,
+                                         kCausalPromptSmemBytes);
     CUDA_CHECK(attr_bf16);
-    static const cudaError_t attr_i8 =
-        cudaFuncSetAttribute(causal_attention_prompt_i8_kernel<Geometry, Metadata>,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize, kCausalPromptI8SmemBytes);
+    const cudaError_t attr_i8 =
+        configure_dynamic_shared_memory(causal_attention_prompt_i8_kernel<Geometry, Metadata>,
+                                         kCausalPromptI8SmemBytes);
     CUDA_CHECK(attr_i8);
 
     const auto tokens = static_cast<std::int32_t>(q.ne[2]);

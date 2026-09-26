@@ -16,6 +16,45 @@
 #include <tuple>
 
 namespace ninfer::artifact {
+
+std::unique_ptr<MaterializedWeightRows>
+materialize_weight_rows(const WeightView& rows, DeviceContext& destination) {
+    const auto region = contiguous_weight_region(rows);
+    const auto& source = region.parent->geometry;
+    if (rows.shape.size() != 2 ||
+        (source.layout != QuantLayout::RowSplit &&
+         !(source.layout == QuantLayout::Contiguous && source.format == QType::BF16))) {
+        throw ArtifactError("tensor parallel rows require BF16 or row-split integer weights");
+    }
+    const auto planes = weight_row_planes(region);
+    auto geometry = weight_geometry(source.format, source.layout, rows.shape);
+    if (geometry.padded_columns != source.padded_columns ||
+        planes.row_count != rows.shape[0]) {
+        throw ArtifactError("tensor parallel row geometry does not match stored columns");
+    }
+    DeviceGuard guard(destination.device);
+    auto out = std::make_unique<MaterializedWeightRows>();
+    out->storage = DeviceBuffer(static_cast<std::size_t>(geometry.bytes));
+    auto* data = static_cast<std::byte*>(out->storage.p);
+    try {
+        CUDA_CHECK(copy_device_async(data, planes.codes, geometry.code_bytes, destination.stream));
+        if (geometry.high_bytes) {
+            CUDA_CHECK(copy_device_async(data + geometry.high_offset, planes.high,
+                                         geometry.high_bytes, destination.stream));
+        }
+        if (geometry.scale_bytes) {
+            CUDA_CHECK(copy_device_async(data + geometry.scale_offset, planes.scales,
+                                         geometry.scale_bytes, destination.stream));
+        }
+        destination.synchronize();
+    } catch (...) {
+        (void)cudaStreamSynchronize(destination.stream);
+        throw;
+    }
+    out->parent = WeightParent{std::move(geometry), data, 0.0F};
+    return out;
+}
+
 namespace {
 
 constexpr std::size_t kSlotBytes        = 64ULL * 1024 * 1024;

@@ -3,6 +3,7 @@
 #include "models/qwen3_5/execution/attention.h"
 #include "models/qwen3_5/execution/gdn.h"
 #include "models/qwen3_5/execution/ffn.h"
+#include "models/qwen3_5/execution/tensor_parallel.h"
 #include "models/qwen3_5/execution/mtp.h"
 #include "models/qwen3_5/execution/workspace.h"
 
@@ -251,7 +252,6 @@ TextContext::TextContext(DeviceContext& ctx, const execution::Parameters& weight
     set_linear_state_slots(0, 0);
     embed_      = &parameters_.text.token_embedding;
     final_norm_ = &parameters_.text.final_norm;
-    lm_head_    = &parameters_.text.output_head;
     mtp_        = parameters_.mtp ? &*parameters_.mtp : nullptr;
     if (mtp_enabled() && mtp_ == nullptr) {
         throw std::invalid_argument("MTP state requires selected MTP parameters");
@@ -704,7 +704,7 @@ void TextContext::ordinary_decode_batch(const Tensor& ids, const Tensor& cache_p
         NullTap tap;
         run_layers(x, Phase::Verify, tap);
         ops::rmsnorm(x, *final_norm_, config_.rms_norm_eps, true, hidden, stream);
-        project(hidden, *lm_head_, logits, work_, stream);
+        project_text_head(hidden, parameters_.text, logits, work_, stream, tensor_parallel_);
     }
     work_.reset();
 }
@@ -764,7 +764,8 @@ void TextContext::target_verify_batch_impl(const Tensor& ids, const Tensor& cach
         Tensor flat_logits = logits.view({dimension(config_.vocab_size), columns});
         Tensor flat_tokens = target_tokens.view({columns});
         ops::rmsnorm(x, *final_norm_, config_.rms_norm_eps, true, flat_hidden, stream);
-        project(flat_hidden, *lm_head_, flat_logits, work_, stream);
+        project_text_head(flat_hidden, parameters_.text, flat_logits, work_, stream,
+                           tensor_parallel_);
         ops::argmax(flat_logits, flat_tokens,
                     dimension(parameters_.model.resources().public_token_count), stream);
     }
@@ -921,8 +922,12 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase 
     }
     ops::sigmoid_mul(gate, a, s);
 
-    ops::linear_add(a.view({dimension(config_.attention->query_width()), T}), p.output.weight, x,
-                    p.output.policy, work_, s);
+    const Tensor output_input = a.view({dimension(config_.attention->query_width()), T});
+    if (tensor_parallel_ && T == 1) {
+        tensor_parallel_->project_add(output_input, p.tensor_parallel_output.value(), x, work_);
+    } else {
+        ops::linear_add(output_input, p.output.weight, x, p.output.policy, work_, s);
+    }
 }
 
 void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase ph) {
@@ -1056,8 +1061,12 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
                            dimension(config_.gdn->linear_num_value_heads), T});
     ops::gated_rmsnorm(o, p.norm, z, config_.rms_norm_eps, on, s);
 
-    ops::linear_add(on.view({dimension(config_.gdn->value_width()), T}), p.output.weight, x,
-                    p.output.policy, work_, s);
+    const Tensor output_input = on.view({dimension(config_.gdn->value_width()), T});
+    if (tensor_parallel_ && T == 1) {
+        tensor_parallel_->project_add(output_input, p.tensor_parallel_output.value(), x, work_);
+    } else {
+        ops::linear_add(output_input, p.output.weight, x, p.output.policy, work_, s);
+    }
 }
 
 ops::SparseMoeHints TextContext::next_projection_hints(int layer) const {
@@ -1066,10 +1075,15 @@ ops::SparseMoeHints TextContext::next_projection_hints(int layer) const {
                                                  : ops::SparseMoeHints{};
 }
 
-void TextContext::mlp_tail(const BlockParameters& weights, Tensor& x, Phase,
+void TextContext::mlp_tail(const BlockParameters& weights, Tensor& x, Phase phase,
                            const ops::SparseMoeHints& hints) {
     Tensor h = workspace::post_mixer_hidden(work_, config_, x.ne[1]);
     ops::rmsnorm(x, weights.post_attention_norm, config_.rms_norm_eps, true, h, ctx_.stream);
+    if (tensor_parallel_) {
+        const auto& dense = std::get<DenseParameters>(weights.ffn);
+        tensor_parallel_->ffn(h, dense.tensor_parallel.value(), x, work_, phase == Phase::Verify);
+        return;
+    }
     ffn(h, weights.ffn, x, hints, work_, ctx_.stream);
 }
 
@@ -1267,7 +1281,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
             if (is_last) {
                 Tensor last_xf = xf.slice(1, len - 1, 1);
                 Tensor logits  = matrix_window(io_.logits, 1);
-                project(last_xf, *lm_head_, logits, work_, s);
+                project_text_head(last_xf, parameters_.text, logits, work_, s, tensor_parallel_);
                 // Set io_.pos to the bonus token's absolute position (base + T) before picking so
                 // the sampler RNG is keyed by it (prefill purpose keeps it distinct from the first
                 // decode step, which reuses the same io_.pos).

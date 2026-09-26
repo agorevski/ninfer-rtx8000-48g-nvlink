@@ -32,12 +32,19 @@ replica 和 consumer view 的物理合同由 [Paged KV Context Store](paged-kv-c
 Prefix reuse 是 admission 的一种来源选择。它复用具有完整身份和状态覆盖的已计算前缀，减少重复
 prefill，保持模型语义和请求顺序。不同 prefill 分块或数值路径之间不要求 logits 或生成 token 完全相同。
 
-当前产品条件为单 GPU、单 resident model、固定 `max_concurrency=1..8` 和非抢占 active requests。
+当前产品条件为单主 GPU 上的 State/KV、单 resident model、固定 `max_concurrency=1..8` 和非抢占 active requests。
 由此得到两个基本规则：
 
 1. Scheduler 先确定本次尝试的 request，资源层只优化该 request 的 materialization；
 2. 一个 request 发布为 Active 后，其最大合法执行范围已经获得完整资源保证，inactive cache policy
    不能再借用这部分容量。
+
+The optional RTX 8000 FFN tensor-parallel device does not add KV or StateImage capacity to these
+resource axes. Its immutable weight rows and startup-fixed execution workspace have separate
+physical ownership; all context placement, reservations, and checkpoint transitions below remain
+on the primary device. A 262,144-token per-request ceiling does not promise eight simultaneous
+262,144-token reservations: admission still requires their combined reservations to fit the
+configured shared pool.
 
 ---
 

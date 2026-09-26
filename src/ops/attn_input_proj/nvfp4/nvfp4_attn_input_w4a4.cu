@@ -9,6 +9,7 @@
 #include <cuda_bf16.h>
 
 #include <cstdint>
+#include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
@@ -87,6 +88,9 @@ void launch_gemm(const Weight& weight, Tensor& q, Tensor& gate, Tensor& k, Tenso
 void nvfp4_attn_input_w4a4_launch(const Tensor& x, const Weight& weight, Tensor& q, Tensor& gate,
                                   Tensor& k, Tensor& v, Nvfp4W4a4Workspace workspace,
                                   cudaStream_t stream) {
+#if defined(NINFER_SM75)
+    throw std::invalid_argument("NVFP4 tensor-core attention projections require SM120a");
+#else
     const std::int32_t tokens = x.ne[1];
     launch_nvfp4_w4a4_quantize(
         x, weight, workspace,
@@ -113,6 +117,7 @@ void nvfp4_attn_input_w4a4_launch(const Tensor& x, const Weight& weight, Tensor&
     } else {
         launch_gemm<M128N128Resident>(weight, q, gate, k, v, workspace, tokens, stream);
     }
+#endif
 }
 
 } // namespace ninfer::ops::detail

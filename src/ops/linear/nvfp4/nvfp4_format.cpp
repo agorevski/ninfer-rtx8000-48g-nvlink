@@ -1,5 +1,6 @@
 #include "core/weight.h"
 #include "ops/linear/nvfp4/nvfp4_format.h"
+#include "ops/linear/turing.h"
 
 #include <cmath>
 #include <cstddef>
@@ -37,6 +38,7 @@ std::uint64_t align_up(std::uint64_t value, std::uint64_t alignment, const char*
 } // namespace
 
 Nvfp4WeightGeometry validate_nvfp4_weight(const Weight& weight, const char* operation) {
+    require_linear_weight_support(QType::NVFP4, operation);
     if (weight.n <= 0 || weight.k <= 0 || (weight.n % 128) != 0 || (weight.k % 64) != 0) {
         throw std::invalid_argument(std::string(operation) + ": NVFP4 requires N%128=0 and K%64=0");
     }

@@ -104,7 +104,8 @@ std::vector<std::int32_t> sampled_indices(std::int32_t extent) {
 }
 
 std::vector<std::uint16_t> make_activation(std::int32_t k, std::int32_t t, std::uint32_t seed,
-                                           ActivationCompute activation_compute) {
+                                           ActivationCompute activation_compute,
+                                           float multiplier) {
     const std::size_t elements = checked_elements(k, t, "activation");
     std::vector<std::uint16_t> result(elements);
     for (std::int32_t token = 0; token < t; ++token) {
@@ -126,7 +127,7 @@ std::vector<std::uint16_t> make_activation(std::int32_t k, std::int32_t t, std::
                 coordinate ^= coordinate >> 16;
             }
             const int raw     = static_cast<int>(coordinate & 0xffU);
-            const float value = static_cast<float>(raw - 128) * (1.0F / 256.0F);
+            const float value = static_cast<float>(raw - 128) * (multiplier / 256.0F);
             result[static_cast<std::size_t>(token) * k + column] = test::f32_to_bf16(value);
         }
     }
@@ -310,7 +311,8 @@ int run_shape(std::string_view label, ActivationCompute activation_compute,
     const std::vector<float> oracle_weight =
         quantized_weight::materialize_rows_fp32(host_weight, oracle_rows);
     const std::vector<std::uint16_t> activation_bits =
-        make_activation(shape.k, maximum->t, shape.seed + 1U, activation_compute);
+        make_activation(shape.k, maximum->t, shape.seed + 1U, activation_compute,
+                        shape.activation_multiplier);
 
     DeviceBuffer device_activation(activation_bits.size() * sizeof(std::uint16_t));
     device_activation.copy_from_host(activation_bits.data(), device_activation.bytes);

@@ -591,6 +591,7 @@ int run_weight_inputs() {
             failures += run_target_projection_case(qk, &gv, t, ops::LinearPolicy::A16Only, t == 17);
         }
     }
+#if !defined(NINFER_SM75)
     {
         DevicePackedWeight parent(
             quantized_weight::make_patterned_weight(QType::FP8_E4M3FN_ROW_BF16, 14336, 5120, 349U));
@@ -601,6 +602,7 @@ int run_weight_inputs() {
         }
     }
     failures += run_nvfp4_target();
+#endif
     failures += run_q8_dflash2();
     return failures;
 }
@@ -624,8 +626,10 @@ int main(int argc, char** argv) {
     if (!dflash2_only) {
         failures += run_q4_q5();
         failures += run_bf16_target();
+#if !defined(NINFER_SM75)
         failures += run_nvfp4_target();
         failures += run_fp8_target();
+#endif
         failures += run_q8_target();
         failures += run_q8_companion();
     }

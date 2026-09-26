@@ -2,6 +2,23 @@ ninfer_add_test(ninfer_qwen3_5_loading_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_loading_real.cpp"
   LIBRARIES ninfer_model_loading)
 
+ninfer_add_test(ninfer_qwen3_5_tensor_parallel_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_tensor_parallel.cpp"
+  LIBRARIES ninfer_model_runtime ninfer_engine)
+set_tests_properties(ninfer_qwen3_5_tensor_parallel_test PROPERTIES SKIP_RETURN_CODE 77)
+ninfer_op_oracle_options(ninfer_qwen3_5_tensor_parallel_test)
+add_test(NAME ninfer_qwen3_5_tensor_parallel_swiglu_test
+  COMMAND ninfer_qwen3_5_tensor_parallel_test --swiglu-seam)
+set_tests_properties(ninfer_qwen3_5_tensor_parallel_swiglu_test PROPERTIES SKIP_RETURN_CODE 77)
+add_test(NAME ninfer_qwen3_5_tensor_parallel_projection_test
+  COMMAND ninfer_qwen3_5_tensor_parallel_test --projection-c1)
+set_tests_properties(ninfer_qwen3_5_tensor_parallel_projection_test PROPERTIES SKIP_RETURN_CODE 77)
+
+ninfer_add_test(ninfer_qwen3_5_tensor_parallel_real_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_tensor_parallel_real.cpp"
+  LIBRARIES ninfer_engine ninfer_model_loading)
+set_tests_properties(ninfer_qwen3_5_tensor_parallel_real_test PROPERTIES SKIP_RETURN_CODE 77)
+
 ninfer_add_test(ninfer_qwen3_5_loading_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_loading.cpp"
   LIBRARIES ninfer_model_loading)

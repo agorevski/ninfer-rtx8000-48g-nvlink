@@ -3,6 +3,7 @@
 
 #include "ops/linear/fp8/fp8_format.h"
 #include "ops/linear/nvfp4/nvfp4_format.h"
+#include "ops/linear/turing.h"
 #include "ops/linear_swiglu/fp8/fp8_linear_swiglu_plan.h"
 #include "ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_plan.h"
 #include "ops/linear_swiglu/q4/q4_linear_swiglu_plan.h"
@@ -34,6 +35,7 @@ std::size_t linear_swiglu_workspace_capacity_bytes(QType qtype, std::int32_t gat
                                                    std::int32_t input_rows, LinearPolicy policy,
                                                    std::int32_t min_tokens,
                                                    std::int32_t max_tokens) {
+    detail::require_linear_weight_support(qtype, "linear_swiglu workspace");
     validate_policy(policy);
     if (min_tokens <= 0 || max_tokens < min_tokens || (gate_up_rows % 2) != 0) {
         throw std::invalid_argument("linear_swiglu workspace: invalid profile or token interval");
@@ -46,8 +48,15 @@ std::size_t linear_swiglu_workspace_capacity_bytes(QType qtype, std::int32_t gat
         return 0;
     }
     if (qtype == QType::Q4_G64_FP16) {
-        return detail::q4_linear_swiglu_capacity_workspace_bytes(
+        const auto capacity = detail::q4_linear_swiglu_capacity_workspace_bytes(
             gate_up_rows, gate_up_rows / 2, input_rows, input_rows, min_tokens, max_tokens);
+#if defined(NINFER_SM75)
+        (void)capacity;
+        return detail::turing_linear_workspace_capacity_bytes(qtype, input_rows, min_tokens,
+                                                               max_tokens);
+#else
+        return capacity;
+#endif
     }
     if (qtype == QType::NVFP4 && gate_up_rows == 34816 && input_rows == 5120) {
         return detail::nvfp4_linear_swiglu_workspace_capacity_bytes(policy, min_tokens, max_tokens);
@@ -67,6 +76,7 @@ std::size_t linear_swiglu_workspace_capacity_bytes(QType qtype, std::int32_t gat
 
 void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, LinearPolicy policy,
                    WorkspaceArena& ws, cudaStream_t stream) {
+    detail::require_linear_weight_support(gate_up_weight.qtype, "linear_swiglu");
     validate_policy(policy);
     if (x.dtype != DType::BF16 || out.dtype != DType::BF16) {
         throw std::invalid_argument("linear_swiglu: x/out must be BF16");
@@ -125,6 +135,9 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
         throw std::invalid_argument("linear_swiglu: required code/scale alignment is missing");
     }
 
+#if defined(NINFER_SM75)
+    if (detail::turing_linear_swiglu(x, gate_up_weight, out, stream, &ws)) return;
+#endif
     if (q8_weight) {
         detail::q8_linear_swiglu_dispatch(x, gate_up_weight, out, stream);
     } else {

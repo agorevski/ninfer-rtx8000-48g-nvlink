@@ -22,16 +22,41 @@
         "BUILD_TESTING": "ON",
         "NINFER_BUILD_BENCHMARKS": "ON"
       }
+    },
+    {
+      "name": "rtx8000",
+      "displayName": "RTX 8000 (SM75) release product binaries",
+      "inherits": "release",
+      "binaryDir": "${sourceDir}/build-rtx8000",
+      "cacheVariables": {
+        "CMAKE_CUDA_ARCHITECTURES": "75"
+      }
+    },
+    {
+      "name": "rtx8000-dev",
+      "displayName": "RTX 8000 (SM75) products, tests and benchmarks",
+      "inherits": "rtx8000",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON",
+        "NINFER_BUILD_BENCHMARKS": "ON"
+      }
     }
   ],
   "buildPresets": [
     { "name": "release", "configurePreset": "release" },
-    { "name": "dev", "configurePreset": "dev" }
+    { "name": "dev", "configurePreset": "dev" },
+    { "name": "rtx8000", "configurePreset": "rtx8000" },
+    { "name": "rtx8000-dev", "configurePreset": "rtx8000-dev" }
   ],
   "testPresets": [
     {
       "name": "dev",
       "configurePreset": "dev",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "rtx8000-dev",
+      "configurePreset": "rtx8000-dev",
       "output": { "outputOnFailure": true }
     }
   ]

@@ -1,8 +1,8 @@
-find_package(CUDAToolkit REQUIRED)
+find_package(CUDAToolkit 12.8 REQUIRED)
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
-  libavformat libavcodec libavutil libswscale)
+  libavformat>=60.16 libavcodec>=60.31 libavutil>=58.29 libswscale>=7.5)
 
 # Repository-pinned header dependencies. No configure-time downloads.
 add_library(ninfer::json INTERFACE IMPORTED GLOBAL)

@@ -6,6 +6,7 @@
 #include "ops/softmax_attention/dense/causal_cache/prompt_nvfp4.cuh"
 
 #include <cstdint>
+#include <stdexcept>
 
 namespace ninfer::ops::detail {
 namespace {
@@ -13,9 +14,12 @@ namespace {
 template <typename Geometry, typename CacheView, typename Metadata>
 void launch_for(const Tensor& q, const Tensor& positions, float scale, const CacheView& cache,
                 Metadata metadata, Tensor& out, cudaStream_t stream) {
-    static const cudaError_t attr = cudaFuncSetAttribute(
+#if defined(NINFER_SM75)
+    throw std::invalid_argument("NVFP4 causal attention is not supported on SM75; use INT8 group64");
+#else
+    const cudaError_t attr = configure_dynamic_shared_memory(
         causal_attention_prompt_nvfp4_kernel<Geometry, Metadata>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize, kCausalPromptNvfp4SmemBytes);
+        kCausalPromptNvfp4SmemBytes);
     CUDA_CHECK(attr);
 
     const auto tokens = static_cast<std::int32_t>(q.ne[2]);
@@ -31,6 +35,7 @@ void launch_for(const Tensor& q, const Tensor& positions, float scale, const Cac
             static_cast<const std::int32_t*>(positions.data), scale,
             static_cast<__nv_bfloat16*>(out.data), tokens);
     CUDA_CHECK(cudaGetLastError());
+#endif
 }
 
 template <typename CacheView, typename Metadata>

@@ -1,11 +1,20 @@
 # NInfer
 
-> Selected checkpoints. Maximum single-GPU inference performance.
+> Selected checkpoints. Native C++/CUDA inference on RTX 5090 and RTX 8000.
 
-NInfer is a from-scratch C++/CUDA inference engine for Qwen3.5 Dense and MoE architectures on a
-single NVIDIA GeForce RTX 5090. It runs text, image, and video prompts through a local CLI or
-OpenAI-/Anthropic-compatible HTTP APIs. The runtime is deliberately specialized: one GPU, one
+NInfer is a from-scratch C++/CUDA inference engine for Qwen3.5 Dense and MoE architectures.
+The original target is a single NVIDIA GeForce RTX 5090; this fork adds an SM75 RTX 8000
+path and optional two-device dense FFN tensor parallelism for Qwen3.8-27B.
+It runs text, image, and video prompts through a local CLI or
+OpenAI-/Anthropic-compatible HTTP APIs. The runtime is deliberately specialized: one primary GPU, one
 resident model, and a startup-fixed capacity of one to eight active requests.
+
+For RTX 8000, use the **groupwise-int** artifact and INT8 KV. The two-device path is text-only
+without speculative decoding; one primary GPU retains all KV and continuation state. It
+parallelizes FFNs within one request rather than serving independent model replicas.
+[RTX 8000 qualification and measurements](docs/performance/rtx8000-qwen3.8-27b.md) track the
+actual evidence and remaining limitations. The historical RTX 5090 results below are not
+RTX 8000 performance claims.
 
 Five official artifacts are available. The quick-start commands use Qwen3.8-27B NVFP4.
 
@@ -28,11 +37,14 @@ the weights again.
 
 ## Quick start
 
-NInfer requires 64-bit Linux, an NVIDIA GeForce RTX 5090, a CUDA toolkit supporting `sm_120a`,
+NInfer requires 64-bit Linux, an NVIDIA RTX 5090 or Quadro RTX 8000, a CUDA toolkit supporting
+the selected `sm_120a` or `sm_75` target,
 CMake 3.28 or newer, a C++20 host compiler, Ninja, `pkg-config`, FFmpeg development libraries
 (`libavformat`, `libavcodec`, `libavutil`, and `libswscale`), and `libcurl >= 7.85`.
 CUDA 13.1 is the validated development toolkit; CMake does not impose a CUDA version floor.
-The build rejects CUDA architectures other than `sm_120a`.
+The default build targets `sm_120a`; the `rtx8000` and `rtx8000-dev` presets target `sm_75`
+in a separate `build-rtx8000/` directory. Other architectures are rejected. The Turing integration
+uses CUDA 12.9 and GCC 13. Compiler, dependency, and Python paths are machine-specific.
 
 Build the product binaries:
 
@@ -43,6 +55,18 @@ cd ninfer
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
+
+For an RTX 8000 build, select a toolkit with SM75 support:
+
+```bash
+cmake --preset rtx8000
+cmake --build build-rtx8000 -j
+```
+
+Use `rtx8000-dev` instead to include numerical tests and benchmarks. GPU selection is explicit:
+expose one card with `CUDA_VISIBLE_DEVICES=0`, or expose a peer-connected pair with
+`CUDA_VISIBLE_DEVICES=2,3` and pass `--device 0 --tensor-parallel-device 1`.
+See [device placement](docs/cli.md#rtx-8000-placement) before using the RTX 5090 commands below.
 
 Tests and benchmarks are excluded from the default build. `cmake --preset release` configures
 the same product build; `cmake --preset dev` also enables tests and benchmarks and finds a

@@ -303,8 +303,8 @@ void launch_mma(const Tensor& x, const Tensor& positions, const Tensor& counts, 
                 const Tensor& scratch, cudaStream_t stream) {
     constexpr int bytes = sizeof(MaterializeStorage<Rows, Columns, BlockK>);
     if constexpr (bytes > 48 * 1024)
-        CUDA_CHECK(cudaFuncSetAttribute(context_kv_mma_kernel<Rows, Columns, BlockK, ColumnWarps>,
-                                        cudaFuncAttributeMaxDynamicSharedMemorySize, bytes));
+        CUDA_CHECK(configure_dynamic_shared_memory(
+            context_kv_mma_kernel<Rows, Columns, BlockK, ColumnWarps>, bytes));
     context_kv_mma_kernel<Rows, Columns, BlockK, ColumnWarps>
         <<<dim3(1024 / Rows, (envelope.max_count * x.ne[2] + Columns - 1) / Columns, 10),
            Rows / 16 * ColumnWarps * 32, bytes, stream>>>(
@@ -463,8 +463,13 @@ void context_kv_materialize_launch(
                                    key_scratch, stream);
         break;
     case Route::Fused64:
+#if defined(NINFER_SM75)
+        launch_mma<128, 64, 64, 2>(context, positions, counts, state_slots, device_layers,
+                                   envelope, key_scratch, stream);
+#else
         launch_mma<128, 64, 128, 2>(context, positions, counts, state_slots, device_layers,
                                     envelope, key_scratch, stream);
+#endif
         return;
     case Route::Mma64:
         launch_mma<64, 64, 64, 2>(context, positions, counts, state_slots, device_layers, envelope,

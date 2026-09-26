@@ -32,8 +32,18 @@ int check(bool condition, const char* message) {
 
 int main() {
     int failures = 0;
+    const auto parallel = parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                 "--device", "0", "--tensor-parallel-device", "1"});
+    failures += check(parallel.device == 0 && parallel.tensor_parallel_device == 1,
+                      "CLI did not preserve the tensor parallel device");
+    failures += check(rejects([] {
+        (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                     "--tensor-parallel-device", "-1"});
+    }), "CLI accepted a negative tensor parallel device");
     const ninfer::cli::Options configured =
         parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--thinking-budget", "37"});
+    failures += check(configured.kv_cache == ninfer::kDefaultKvCacheStorage,
+                      "CLI did not preserve the target KV default");
     failures += check(configured.thinking_budget == 37,
                       "--thinking-budget did not preserve its positive value");
     failures +=

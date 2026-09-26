@@ -35,6 +35,12 @@ enum class KvCacheStorage : std::uint8_t {
     Fp8KeyNvfp4Value,
 };
 
+#if defined(NINFER_SM75)
+inline constexpr KvCacheStorage kDefaultKvCacheStorage = KvCacheStorage::Int8Group64;
+#else
+inline constexpr KvCacheStorage kDefaultKvCacheStorage = KvCacheStorage::BFloat16;
+#endif
+
 enum class EnginePurpose : std::uint8_t {
     Generation,
     CausalScoring,
@@ -153,13 +159,15 @@ struct EngineOptions {
     std::filesystem::path chat_template_path;
     EnginePurpose purpose              = EnginePurpose::Generation;
     int device                         = 0;
+    // Optional second CUDA-visible device for dense FFN tensor parallelism.
+    std::optional<int> tensor_parallel_device;
     std::uint32_t max_context          = 2048; // Logical ceiling of one request or score window.
     KvCapacityPolicy kv_capacity       = KvCapacityPolicy::explicit_capacity(2048);
     std::uint32_t max_concurrency      = 1;
     std::uint32_t max_pending_requests = 16;
     std::uint32_t pending_timeout_ms   = 30000;
     std::uint32_t prefill_chunk        = 1024;
-    KvCacheStorage kv_cache            = KvCacheStorage::BFloat16;
+    KvCacheStorage kv_cache            = kDefaultKvCacheStorage;
     SpeculativeOptions speculative;
     std::size_t media_cache_bytes = kDefaultMediaCacheBytes;
     std::size_t media_live_bytes  = kDefaultMediaLiveBytes;
@@ -828,6 +836,12 @@ struct VisionWorkspaceMemorySummary {
     std::size_t handoff_peak_bytes        = 0;
 };
 
+struct TensorParallelMemorySummary {
+    int device = 0;
+    ArenaMemorySummary weights;
+    ArenaMemorySummary workspace;
+};
+
 struct MemorySummary {
     int device                                = 0;
     std::uint32_t max_context                 = 0;
@@ -839,6 +853,7 @@ struct MemorySummary {
     ArenaMemorySummary weights;
     ArenaMemorySummary sequence;
     ArenaMemorySummary workspace;
+    std::optional<TensorParallelMemorySummary> tensor_parallel;
     std::optional<VisionWorkspaceMemorySummary> vision_workspace;
     std::size_t minimum_runtime_reservation_bytes = 0;
     std::size_t kv_capacity_increment_bytes       = 0;

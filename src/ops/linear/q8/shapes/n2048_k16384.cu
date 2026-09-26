@@ -17,8 +17,9 @@ using C48 = Q8KSplitSchedule<8, 48, 2, Access::Shared, Cache::cg, Cache::cg, Sta
 using C56 = Q8KSplitSchedule<8, 56, 2, Access::Shared, Cache::cg, Cache::cg, Stage::ActiveOnly>;
 using C64 = Q8KSplitSchedule<8, 64, 2, Access::Shared, Cache::cg, Cache::cg, Stage::ActiveOnly>;
 
-template <int Capacity, int KWarps, int TokenGroups>
+template <int Capacity, int RequestedKWarps, int TokenGroups>
 void launch_grouped(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
+    constexpr int KWarps = q8_physical_k_warps<RequestedKWarps, Capacity>;
     if (weight.padded_shape[1] != Geometry::kInputRows) {
         throw std::invalid_argument(
             "q8 grouped K-split: padded K differs from registered geometry");

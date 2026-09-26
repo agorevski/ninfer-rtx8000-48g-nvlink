@@ -7,6 +7,7 @@
 #include "ops/linear/fp8/fp8_a8_schedule.cuh"
 #include "ops/linear/fp8/fp8_a8_plan.h"
 #include <algorithm>
+#include <stdexcept>
 
 namespace ninfer::ops::detail {
 template <class Geometry, class Schedule>
@@ -48,6 +49,9 @@ void launch_fp8_a16_chunks(const Tensor& x, const Weight& weight, Tensor& out,
 template <class Geometry, class Schedule, bool FullTokens>
 void launch_fp8_a8_mma(const Weight& weight, Tensor& out, Fp8A8Workspace workspace,
                        std::int32_t tokens, cudaStream_t stream) {
+#if defined(NINFER_SM75)
+    throw std::invalid_argument("FP8 tensor-core projections are unavailable on SM75");
+#else
     static_assert((Geometry::kOutputRows % Schedule::kBlockRows) == 0);
     static_assert((Geometry::kInputRows % Schedule::kBlockK) == 0);
     const int row_tiles   = Geometry::kOutputRows / Schedule::kBlockRows;
@@ -56,11 +60,10 @@ void launch_fp8_a8_mma(const Weight& weight, Tensor& out, Fp8A8Workspace workspa
     const Fp8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), Geometry::kOutputRows};
 
     if constexpr (Schedule::kSharedBytes > 48 * 1024) {
-        static const cudaError_t attribute = cudaFuncSetAttribute(
+        CUDA_CHECK(configure_dynamic_shared_memory(
             fp8_mma_kernel<Geometry, Schedule, FullTokens, Fp8IdentityEpilogue,
                            Fp8ContiguousOutput>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, Schedule::kSharedBytes);
-        CUDA_CHECK(attribute);
+            Schedule::kSharedBytes));
     }
     fp8_mma_kernel<Geometry, Schedule, FullTokens>
         <<<blocks, Schedule::kThreads, Schedule::kSharedBytes, stream>>>(
@@ -68,6 +71,7 @@ void launch_fp8_a8_mma(const Weight& weight, Tensor& out, Fp8A8Workspace workspa
             static_cast<const __nv_bfloat16*>(weight.scales), tokens, Fp8IdentityEpilogue{},
             output);
     CUDA_CHECK(cudaGetLastError());
+#endif
 }
 
 template <class Geometry, class Schedule>

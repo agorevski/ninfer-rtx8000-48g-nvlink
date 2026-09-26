@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ops/common/math.cuh"
+#include "ops/linear/a16_operand.cuh"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -96,7 +97,7 @@ struct Q5MmaDecodeAtom {
         }
     }
 
-    static __device__ __forceinline__ __nv_bfloat162 decode_pair(const std::uint8_t* staged_codes,
+    static __device__ __forceinline__ A16OperandPair decode_pair(const std::uint8_t* staged_codes,
                                                                  const std::uint8_t* staged_high,
                                                                  const std::uint8_t* scale_ptr,
                                                                  std::int64_t staged_group_index,
@@ -113,8 +114,7 @@ struct Q5MmaDecodeAtom {
         const int q1 =
             ((static_cast<int>(packed >> 4) | (((high_byte >> (shift + 1)) & 1) << 4)) ^ 0x10) -
             0x10;
-        return __floats2bfloat162_rn(static_cast<float>(q0) * scale,
-                                     static_cast<float>(q1) * scale);
+        return a16_operand_pair(static_cast<float>(q0) * scale, static_cast<float>(q1) * scale);
     }
 };
 

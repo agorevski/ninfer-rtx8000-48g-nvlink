@@ -8,6 +8,7 @@
 #include "ops/common/math.cuh"
 #include "ops/common/rowsplit_mma.cuh"
 #include "ops/linear/q4/q4_rowsplit_storage.cuh"
+#include "ops/linear/turing_tile.cuh"
 
 #include <cuda_bf16.h>
 
@@ -29,15 +30,19 @@ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q4_linear_swiglu_mma_split
     constexpr int MT   = Cfg::MT;
     constexpr int NT   = Cfg::NT;
     constexpr int KSUB = BK / 16;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
+    constexpr int S    = 1;
+#else
     constexpr int S    = Cfg::STAGES;
+#endif
     constexpr int SB   = Cfg::SCALE_BYTES;
     constexpr int PM   = BM / 2;
     static_assert(BK == 64, "folded gate/up Q4 kernel requires one group per K tile");
     static_assert(BM == 64 && WM == 64 && MT == 4,
                   "folded gate/up mapping requires one 64-row warp tile");
 
-    __shared__ __align__(16) __nv_bfloat16 As[BM * BK];
-    __shared__ __align__(16) __nv_bfloat16 Bs[S][BN * BK];
+    __shared__ __align__(16) A16Operand As[BM * BK];
+    __shared__ __align__(16) A16Operand Bs[S][BN * BK];
     __shared__ __align__(16) std::uint8_t Cr[S][BM * 32];
     __shared__ __align__(16) std::uint8_t Sr[S][BM * SB];
 
@@ -61,6 +66,11 @@ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q4_linear_swiglu_mma_split
         }
     }
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 750
+    turing_rowsplit_tile<4, BM, BN, WM, WN>(
+        x, codes, nullptr, scales, As, Bs[0], acc, k, padded_k, t, t0,
+        TuringPairedRows<PM>{m0, intermediate});
+#else
     const int NKT      = padded_k / BK;
     const int a_mat    = lane >> 3;
     const int a_rin    = lane & 7;
@@ -78,11 +88,13 @@ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q4_linear_swiglu_mma_split
             const int kl       = kg8 * 8;
             const int col      = t0 + tl;
             const int kk       = k0 + kl;
-            __nv_bfloat16* dst = &Bs[stage][tl * BK + gemm_swz64(tl, kl)];
+            auto* dst = &Bs[stage][tl * BK + gemm_swz64(tl, kl)];
             if constexpr (FullTiles) {
-                gemm_cp_async<16, Cfg>(dst, &x[static_cast<std::int64_t>(col) * k + kk]);
+                a16_stage_activation<Cfg::CG_LOAD ? Cache::cg : Cache::ca>(
+                    dst, &x[static_cast<std::int64_t>(col) * k + kk]);
             } else if (col < t && kk + 8 <= k) {
-                gemm_cp_async<16, Cfg>(dst, &x[static_cast<std::int64_t>(col) * k + kk]);
+                a16_stage_activation<Cfg::CG_LOAD ? Cache::cg : Cache::ca>(
+                    dst, &x[static_cast<std::int64_t>(col) * k + kk]);
             } else {
                 store_vec(dst, make_int4(0, 0, 0, 0));
             }
@@ -149,7 +161,7 @@ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q4_linear_swiglu_mma_split
     auto dequant_to_As = [&](int stage, int kt) {
         const int scale_off = ((kt * BK >> 6) & 1) * 2;
         for (int row = warp; row < BM; row += Cfg::WARPS) {
-            const __nv_bfloat162 w = Q4MmaDecodeAtom::decode_pair(
+            const A16OperandPair w = Q4MmaDecodeAtom::decode_pair(
                 Cr[stage], &Sr[stage][row * SB + scale_off], row, lane);
             const int sc = gemm_swz64(row, 2 * lane);
             store_vec(&As[row * BK + sc], w);
@@ -190,7 +202,7 @@ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q4_linear_swiglu_mma_split
             for (int mi = 0; mi < MT; ++mi) {
 #pragma unroll
                 for (int ni = 0; ni < NT; ++ni) {
-                    mma_bf16(acc[mi][ni][0], acc[mi][ni][1], acc[mi][ni][2], acc[mi][ni][3],
+                    a16_mma(acc[mi][ni][0], acc[mi][ni][1], acc[mi][ni][2], acc[mi][ni][3],
                              af[mi][0], af[mi][1], af[mi][2], af[mi][3], bf[ni][0], bf[ni][1]);
                 }
             }
@@ -202,6 +214,7 @@ __launch_bounds__(Cfg::THREADS, Cfg::MIN_BLOCKS) void q4_linear_swiglu_mma_split
         ninfer::ops::cp_commit();
     }
 
+#endif
 #pragma unroll
     for (int mi = 0; mi < MT / 2; ++mi) {
         const int r0 = m0 + mi * 16 + gid;

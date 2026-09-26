@@ -9,6 +9,7 @@
 #include <cuda_bf16.h>
 
 #include <array>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -90,9 +91,15 @@ constexpr auto make_launchers(std::index_sequence<Offsets...>) {
 constexpr auto kLaunchers =
     make_launchers(std::make_index_sequence<kLastExactT - kFirstExactT + 1>{});
 
-template <int TileCols, int KSplits, int NGroups, int MinBlocks>
+template <int TileCols, int RequestedKSplits, int NGroups, int MinBlocks>
 void launch_medium(const Tensor& x, const Weight& first_weight, const Weight& second_weight,
                    Tensor& first_out, Tensor& second_out, cudaStream_t stream) {
+#if defined(NINFER_SM75)
+    constexpr int PhysicalCols = TileCols > 160 ? TileCols / 2 : TileCols;
+#else
+    constexpr int PhysicalCols = TileCols;
+#endif
+    constexpr int KSplits = q8_physical_k_warps<RequestedKSplits, PhysicalCols>;
     const auto* first_codes  = static_cast<const std::uint8_t*>(first_weight.qdata);
     const auto* first_scales = static_cast<const std::uint8_t*>(first_weight.scales);
     if (static_cast<const std::uint8_t*>(second_weight.qdata) != first_codes + kRows * kHidden ||
@@ -100,11 +107,18 @@ void launch_medium(const Tensor& x, const Weight& first_weight, const Weight& se
             first_scales + kRows * (kHidden / 32) * 2) {
         throw std::invalid_argument("Q8 medium pair requires adjacent K/V row views");
     }
-    const PairOutput output{static_cast<__nv_bfloat16*>(first_out.data),
-                            static_cast<__nv_bfloat16*>(second_out.data)};
-    q8_ksplit_grouped_mma_kernel<kHidden, TileCols, KSplits, NGroups, MinBlocks>
-        <<<(2 * kRows) / 16, KSplits * NGroups * 32, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data), first_codes, first_scales, output, x.ne[1]);
+    for (int begin = 0; begin < x.ne[1]; begin += PhysicalCols) {
+        const int count = std::min(PhysicalCols, x.ne[1] - begin);
+        const auto input = x.slice(1, begin, count);
+        const auto first = first_out.slice(1, begin, count);
+        const auto second = second_out.slice(1, begin, count);
+        const PairOutput output{static_cast<__nv_bfloat16*>(first.data),
+                                static_cast<__nv_bfloat16*>(second.data)};
+        q8_ksplit_grouped_mma_kernel<kHidden, PhysicalCols, KSplits, NGroups, MinBlocks>
+            <<<(2 * kRows) / 16, KSplits * NGroups * 32, 0, stream>>>(
+                static_cast<const __nv_bfloat16*>(input.data), first_codes, first_scales, output,
+                count);
+    }
 }
 
 } // namespace

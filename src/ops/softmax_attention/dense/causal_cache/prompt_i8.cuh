@@ -20,7 +20,11 @@ namespace ninfer::ops {
 inline constexpr int kCausalPromptI8Warps      = 16;
 inline constexpr int kCausalPromptI8Threads    = kCausalPromptI8Warps * 32;
 inline constexpr int kCausalPromptI8Br         = 64;
+#if defined(NINFER_SM75)
+inline constexpr int kCausalPromptI8Bc         = 32;
+#else
 inline constexpr int kCausalPromptI8Bc         = 64;
+#endif
 inline constexpr int kCausalPromptI8Groups     = kCausalPromptHeadDim / kKVCacheInt8Group;
 inline constexpr int kCausalPromptI8DB16       = kCausalPromptHeadDim / 2;
 inline constexpr int kCausalPromptI8RowTiles   = kCausalPromptI8Br / 16;
@@ -46,7 +50,7 @@ inline constexpr int kCausalPromptI8SmemBytes =
 
 static_assert(kCausalPromptI8Groups == 4);
 static_assert(kCausalPromptI8DConsumers == 4);
-static_assert(kCausalPromptI8SmemBytes == 92672);
+static_assert(kCausalPromptI8SmemBytes <= (kCausalPromptI8Bc == 32 ? 65536 : 98304));
 
 __device__ __forceinline__ int4 causal_prompt_i8_dequant_f16x8(const std::int8_t* codes8,
                                                                __half scale) {
@@ -167,7 +171,8 @@ __global__ __maxnreg__(120) void causal_attention_prompt_i8_kernel(
             __half* vd    = &v_scale_s[key_l * Groups];
             if (key <= max_query_abs) {
                 const std::int64_t off =
-                    kv_cache_int8_quant_scale_index<Geometry>(physical_page, kv_head, 0, key_l);
+                    kv_cache_int8_quant_scale_index<Geometry>(
+                        physical_page, kv_head, 0, key & kPagedKVPageMask);
                 ninfer::ops::cp_async<8>(kd, &cache_k_scale[off]);
                 ninfer::ops::cp_async<8>(vd, &cache_v_scale[off]);
             } else {
@@ -185,7 +190,8 @@ __global__ __maxnreg__(120) void causal_attention_prompt_i8_kernel(
             std::int8_t* vd = &v_i8[key_l * D + d];
             if (key <= max_query_abs) {
                 const std::int64_t off =
-                    kv_cache_int8_quant_code_index<Geometry>(physical_page, kv_head, d, key_l);
+                    kv_cache_int8_quant_code_index<Geometry>(
+                        physical_page, kv_head, d, key & kPagedKVPageMask);
                 cp_async<16, Cache::cg>(kd, &cache_k[off]);
                 cp_async<16, Cache::cg>(vd, &cache_v[off]);
             } else {
